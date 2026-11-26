@@ -140,14 +140,14 @@ def write_file(filename: str, content: str) -> str:
     # 3. รองรับรูปแบบมาตรฐาน data:image/...;base64,...
     if content.startswith("data:") and ";base64," in content[:120]:
         b64_str = content.split(";base64,", 1)[1].strip()
-        raw_bytes = base64.b64decode(b64_str)
-        atomic_write(path, raw_bytes)
+        raw_bytes = _decode_base64_limited(b64_str)
+        atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES)
         return f"บันทึกไฟล์รูปภาพ/ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
     # 4. บันทึกไฟล์ข้อความปกติ (UTF-8)
     raw_bytes = content.encode("utf-8")
     _check_file_size(len(raw_bytes))
-    atomic_write(path, raw_bytes)
+    atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES)
     return f"บันทึกไฟล์ข้อความ {filename} เรียบร้อยแล้ว (ขนาด {len(content)} ตัวอักษร)"
 
 @mcp.tool()
@@ -158,7 +158,7 @@ def write_binary_file(filename: str, base64_data: str, append: bool = False) -> 
     if base64_data.startswith("data:") and ";base64," in base64_data[:120]:
         base64_data = base64_data.split(";base64,", 1)[1]
     raw_bytes = _decode_base64_limited(base64_data)
-    total = atomic_write(path, raw_bytes, append=append)
+    total = atomic_write(path, raw_bytes, append=append, max_existing_bytes=MAX_FILE_BYTES)
     return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาดรวม {total} bytes)"
 
 @mcp.tool()
