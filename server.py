@@ -127,14 +127,14 @@ def write_file(filename: str, content: str) -> str:
     if content.startswith("[APPEND_BASE64]:"):
         b64_str = content[len("[APPEND_BASE64]:"):].strip()
         raw_bytes = _decode_base64_limited(b64_str)
-        total = atomic_write(path, raw_bytes, append=True)
+        total = atomic_write(path, raw_bytes, append=True, max_existing_bytes=MAX_FILE_BYTES)
         return f"เพิ่มข้อมูลไบนารีลงในไฟล์ {filename} เรียบร้อยแล้ว (+{len(raw_bytes)} bytes, รวม {total} bytes)"
 
     # 2. รองรับการบันทึกไฟล์ไบนารี/รูปภาพผ่าน Prefix [BASE64]:
     if content.startswith("[BASE64]:"):
         b64_str = content[len("[BASE64]:"):].strip()
         raw_bytes = base64.b64decode(b64_str)
-        atomic_write(path, raw_bytes)
+        atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES)
         return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
     # 3. รองรับรูปแบบมาตรฐาน data:image/...;base64,...
@@ -167,7 +167,7 @@ def download_file_from_url(filename: str, url: str) -> str:
     path = writable_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = download_url(url, max_bytes=MAX_FILE_BYTES)
-    atomic_write(path, data)
+    atomic_write(path, data, max_existing_bytes=MAX_FILE_BYTES)
     return f"ดาวน์โหลดไฟล์ {filename} จาก URL เรียบร้อยแล้ว (ขนาด {len(data)} bytes)"
 
 # กำหนดเฉพาะคำสั่งที่อนุญาตให้รันแบบตายตัวเพื่อป้องกันการแทรกคำสั่งอันตราย
