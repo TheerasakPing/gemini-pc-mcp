@@ -5,6 +5,7 @@ import subprocess
 
 # Network controls: URL downloads are deny-by-default and size-limited.
 from security import download_url
+from filesystem import atomic_write, safe_workspace_path
 
 def build_transport_security_settings():
     """Build a fail-closed Host/Origin allowlist for the MCP HTTP transport."""
@@ -64,13 +65,8 @@ WORKSPACE_DIR = Path(os.getenv("MCP_WORKSPACE", DEFAULT_WORKSPACE)).resolve()
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
 def safe_path(rel_path: str) -> Path:
-    """ตรวจสอบความปลอดภัยเพื่อป้องกัน Path Traversal ออกนอกโฟลเดอร์ทำงาน"""
-    target = (WORKSPACE_DIR / rel_path).resolve()
-    if not target.is_relative_to(WORKSPACE_DIR):
-        raise ValueError("ไม่อนุญาตให้เข้าถึงไฟล์นอกโฟลเดอร์ที่กำหนด (Directory Traversal Blocked)")
-    if is_hidden(target):
-        raise ValueError("ไฟล์นี้เป็นไฟล์ลับของระบบ เข้าถึงไม่ได้")
-    return target
+    """ตรวจสอบ traversal, symlink และ reparse point ก่อนเข้าถึง Workspace"""
+    return safe_workspace_path(WORKSPACE_DIR, rel_path, HIDDEN_NAMES)
 
 # ไฟล์ลับ/ไฟล์ระบบ: ห้ามอ่าน ห้ามเขียน ห้ามแสดงในรายการ
 HIDDEN_NAMES = {".tunnel_token", ".mcp_secret", ".git", ".env"}
@@ -93,7 +89,7 @@ def writable_path(rel_path: str) -> Path:
 @mcp.tool()
 def list_files() -> list[str]:
     """แสดงรายชื่อไฟล์ทั้งหมดในโฟลเดอร์ทำงานบน PC"""
-    return [str(p.relative_to(WORKSPACE_DIR)) for p in WORKSPACE_DIR.rglob("*") if p.is_file() and not is_hidden(p)]
+    return [str(p.relative_to(WORKSPACE_DIR)) for p in WORKSPACE_DIR.rglob("*") if p.is_file() and not p.is_symlink() and not is_hidden(p)]
 
 @mcp.tool()
 def read_file(filename: str) -> str:
@@ -110,26 +106,25 @@ def write_file(filename: str, content: str) -> str:
     if content.startswith("[APPEND_BASE64]:"):
         b64_str = content[len("[APPEND_BASE64]:"):].strip()
         raw_bytes = base64.b64decode(b64_str)
-        with open(path, "ab") as f:
-            f.write(raw_bytes)
-        return f"เพิ่มข้อมูลไบนารีลงในไฟล์ {filename} เรียบร้อยแล้ว (+{len(raw_bytes)} bytes, รวม {path.stat().st_size} bytes)"
+        total = atomic_write(path, raw_bytes, append=True)
+        return f"เพิ่มข้อมูลไบนารีลงในไฟล์ {filename} เรียบร้อยแล้ว (+{len(raw_bytes)} bytes, รวม {total} bytes)"
 
     # 2. รองรับการบันทึกไฟล์ไบนารี/รูปภาพผ่าน Prefix [BASE64]:
     if content.startswith("[BASE64]:"):
         b64_str = content[len("[BASE64]:"):].strip()
         raw_bytes = base64.b64decode(b64_str)
-        path.write_bytes(raw_bytes)
+        atomic_write(path, raw_bytes)
         return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
     # 3. รองรับรูปแบบมาตรฐาน data:image/...;base64,...
     if content.startswith("data:") and ";base64," in content[:120]:
         b64_str = content.split(";base64,", 1)[1].strip()
         raw_bytes = base64.b64decode(b64_str)
-        path.write_bytes(raw_bytes)
+        atomic_write(path, raw_bytes)
         return f"บันทึกไฟล์รูปภาพ/ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
     # 4. บันทึกไฟล์ข้อความปกติ (UTF-8)
-    path.write_text(content, encoding="utf-8")
+    atomic_write(path, content.encode("utf-8"))
     return f"บันทึกไฟล์ข้อความ {filename} เรียบร้อยแล้ว (ขนาด {len(content)} ตัวอักษร)"
 
 @mcp.tool()
@@ -140,10 +135,8 @@ def write_binary_file(filename: str, base64_data: str, append: bool = False) -> 
     if base64_data.startswith("data:") and ";base64," in base64_data[:120]:
         base64_data = base64_data.split(";base64,", 1)[1]
     raw_bytes = base64.b64decode(base64_data.strip())
-    mode = "ab" if append else "wb"
-    with open(path, mode) as f:
-        f.write(raw_bytes)
-    return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาดรวม {path.stat().st_size} bytes)"
+    total = atomic_write(path, raw_bytes, append=append)
+    return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาดรวม {total} bytes)"
 
 @mcp.tool()
 def download_file_from_url(filename: str, url: str) -> str:
@@ -151,7 +144,7 @@ def download_file_from_url(filename: str, url: str) -> str:
     path = writable_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = download_url(url)
-    path.write_bytes(data)
+    atomic_write(path, data)
     return f"ดาวน์โหลดไฟล์ {filename} จาก URL เรียบร้อยแล้ว (ขนาด {len(data)} bytes)"
 
 # กำหนดเฉพาะคำสั่งที่อนุญาตให้รันแบบตายตัวเพื่อป้องกันการแทรกคำสั่งอันตราย
