@@ -3,6 +3,8 @@ import base64
 import hmac
 import locale
 import logging
+import shutil
+import sys
 from pathlib import Path
 import subprocess
 import threading
@@ -12,6 +14,7 @@ from security import download_url
 from filesystem import (
     atomic_write,
     list_workspace_files,
+    matches_any,
     read_file_bytes,
     safe_workspace_path,
 )
@@ -68,30 +71,68 @@ except ImportError:
 mcp = FastMCP("PC-Workspace", host="127.0.0.1", port=8000)
 
 # กำหนดโฟลเดอร์ทำงาน (Sandbox)
-# ค่าเริ่มต้น: โฟลเดอร์หลักของโปรเจกต์ หรือกำหนดพาธที่ต้องการผ่าน Environment Variable 'MCP_WORKSPACE'
-DEFAULT_WORKSPACE = Path(__file__).resolve().parent
-WORKSPACE_DIR = Path(os.getenv("MCP_WORKSPACE", DEFAULT_WORKSPACE)).resolve()
+# ค่าเริ่มต้น: โฟลเดอร์ย่อย workspace/ ข้าง server.py ไม่ใช่โฟลเดอร์แอป
+# (โฟลเดอร์แอปคือ sys.path[0] และมีไฟล์ dependency/CI ที่ AI ไม่ควรแก้)
+# หรือกำหนดพาธผ่าน Environment Variable 'MCP_WORKSPACE'
+DEFAULT_WORKSPACE = Path(__file__).resolve().parent / "workspace"
+
+def resolve_workspace(raw: str | Path | None) -> Path:
+    """root ของดิสก์หรือโฮมไดเรกทอรีไม่ใช่ Workspace เพราะเท่ากับเปิดทั้งเครื่องให้ AI"""
+    workspace = Path(str(raw or "").strip() or DEFAULT_WORKSPACE).resolve()
+    if workspace == Path(workspace.anchor) or workspace == Path.home().resolve():
+        raise ValueError(
+            "MCP_WORKSPACE ต้องเป็นโฟลเดอร์เฉพาะสำหรับงาน ไม่ใช่ root ของดิสก์หรือโฮมไดเรกทอรี"
+        )
+    return workspace
+
+WORKSPACE_DIR = resolve_workspace(os.getenv("MCP_WORKSPACE"))
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
 def safe_path(rel_path: str) -> Path:
     """ตรวจสอบ traversal, symlink และ reparse point ก่อนเข้าถึง Workspace"""
     return safe_workspace_path(WORKSPACE_DIR, rel_path, HIDDEN_NAMES)
 
-# ไฟล์ลับ/ไฟล์ระบบ: ห้ามอ่าน ห้ามเขียน ห้ามแสดงในรายการ (เทียบชื่อแบบไม่สนตัวพิมพ์)
-HIDDEN_NAMES = {".tunnel_token", ".mcp_secret", ".git", ".env"}
-# ห้ามเขียนทับไฟล์ที่ Python/Windows โหลดหรือรันได้ (โฟลเดอร์แอปคือ sys.path[0] ด้วย .pyc/.pyd shadow โมดูลได้)
+# ไฟล์ลับ/ไฟล์ระบบ: ห้ามอ่าน ห้ามเขียน ห้ามแสดงในรายการ
+# เทียบชื่อแบบไม่สนตัวพิมพ์ และรองรับ glob เพราะ .env.local หรือ prod.env ก็เป็นไฟล์ลับเหมือน .env
+HIDDEN_NAMES = {
+    ".tunnel_token", ".tunnel_token.*", ".mcp_secret", ".mcp_secret.*", ".git",
+    ".env*", "*.env",
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker",
+    ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".gitconfig",
+    "id_rsa*", "id_ed25519*", "id_ecdsa*", "*.pem", "*.key", "*.p12", "*.pfx",
+}
+# ห้ามเขียนทับไฟล์ที่ Python/Windows/shell โหลดหรือรันได้ (.pyc/.pyd shadow โมดูลได้, .sh/.cjs รันโดย interpreter)
 BLOCKED_WRITE_EXT = {
-    ".py", ".pyw", ".pyc", ".pyo", ".pyd", ".pyz", ".pyzw", ".pth", ".so",
+    ".py", ".pyw", ".pyc", ".pyo", ".pyd", ".pyz", ".pyzw", ".pth", ".so", ".dylib", ".ocx",
     ".bat", ".cmd", ".com", ".exe", ".dll", ".scr", ".pif", ".cpl", ".msi", ".msp", ".msc",
+    ".msix", ".appx", ".settingcontent-ms",
     ".ps1", ".psm1", ".ps1xml", ".ps2", ".psc1",
     ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsc", ".wsh", ".hta", ".sct",
+    ".sh", ".bash", ".zsh", ".fish", ".ksh", ".cjs", ".mjs", ".rb", ".pl", ".pm",
+    ".php", ".lua", ".tcl", ".jar",
+    ".command", ".tool", ".scpt", ".applescript", ".terminal", ".inetloc", ".desktop", ".service",
     ".lnk", ".scf", ".url", ".reg",
+}
+# ชื่อที่เครื่องมือรันหรือโหลดอัตโนมัติตอน install, build, push, login: AI ห้ามแก้ ผู้ใช้ต้องแก้เอง
+BLOCKED_WRITE_NAMES = {
+    "requirements*.txt", "pyproject.toml", "setup.cfg", "pipfile*", "poetry.lock", "uv.lock",
+    "package.json", "*-lock.json", "*-lock.yaml", "yarn.lock", ".yarnrc.yml", ".npmrc",
+    "cargo.toml", "cargo.lock", "build.rs", "go.mod", "go.sum", "gemfile*", ".gitmodules",
+    ".github", ".gitlab", ".gitlab-ci.yml", ".circleci", ".buildkite", "jenkinsfile", ".travis.yml",
+    "appveyor.yml", "azure-pipelines.yml", ".drone.yml", ".pre-commit-config.yaml",
+    "makefile", "gnumakefile", "dockerfile*", "docker-compose*.yml", "docker-compose*.yaml",
+    ".envrc",
+    ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv",
+    ".zlogin", ".zlogout", ".zprofile", ".kshrc", ".cshrc", ".tcshrc", ".login", ".logout",
 }
 
 def writable_path(rel_path: str) -> Path:
     target = safe_path(rel_path)
     if target.suffix.lower() in BLOCKED_WRITE_EXT:
         raise ValueError(f"ไม่อนุญาตให้เขียนไฟล์ชนิด {target.suffix} ผ่าน MCP")
+    if any(matches_any(part.casefold(), BLOCKED_WRITE_NAMES)
+           for part in target.relative_to(WORKSPACE_DIR).parts):
+        raise ValueError("ไม่อนุญาตให้แก้ไฟล์ dependency/CI/build/shell config ผ่าน MCP ผู้ใช้ต้องแก้เอง")
     return target
 
 def _env_int(name: str, default: int) -> int:
@@ -150,7 +191,6 @@ def read_file(filename: str) -> str:
 def write_file(filename: str, content: str) -> str:
     """สร้างหรือแก้ไขไฟล์ในโฟลเดอร์ทำงาน (รองรับทั้งข้อความปกติ, Base64 Data URI / [BASE64]:..., และ [APPEND_BASE64]:... สำหรับไฟล์รูปภาพ/ไบนารี)"""
     path = writable_path(filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
 
     # 1. รองรับการต่อไฟล์ไบนารีทีละส่วน (Chunked Base64 Append) สำหรับไฟล์ภาพขนาดใหญ่
     if content.startswith("[APPEND_BASE64]:"):
@@ -183,7 +223,6 @@ def write_file(filename: str, content: str) -> str:
 def write_binary_file(filename: str, base64_data: str, append: bool = False) -> str:
     """สร้างหรือบันทึกไฟล์รูปภาพ/ไบนารี (.png, .jpg, .webp, .mp4 ฯลฯ) จากข้อมูล Base64 ลงในโฟลเดอร์ทำงาน"""
     path = writable_path(filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
     if base64_data.startswith("data:") and ";base64," in base64_data[:120]:
         base64_data = base64_data.split(";base64,", 1)[1]
     raw_bytes = _decode_base64_limited(base64_data)
@@ -194,17 +233,19 @@ def write_binary_file(filename: str, base64_data: str, append: bool = False) -> 
 def download_file_from_url(filename: str, url: str) -> str:
     """ดาวน์โหลดไฟล์หรือรูปภาพจาก URL มาเก็บไว้ในโฟลเดอร์ทำงานบน PC"""
     path = writable_path(filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = download_url(url, max_bytes=MAX_FILE_BYTES)
     atomic_write(path, data, max_existing_bytes=MAX_FILE_BYTES, root=WORKSPACE_DIR)
     return f"ดาวน์โหลดไฟล์ {filename} จาก URL เรียบร้อยแล้ว (ขนาด {len(data)} bytes)"
 
 # กำหนดเฉพาะคำสั่งที่อนุญาตให้รันแบบตายตัวเพื่อป้องกันการแทรกคำสั่งอันตราย
+# ใช้พาธเต็มของ executable: Win32 จะหาชื่อที่ตรงกันในโฟลเดอร์ปัจจุบันก่อน PATH ด้วย
+_GIT = shutil.which("git")
+_CMD = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"
 ALLOWED_COMMANDS = {
     # -c core.fsmonitor=false: ห้ามให้ hook ที่อยู่ใน repo รันตอนเรียก status
-    "git_status": ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "status"],
-    "python_version": ["python", "--version"],
-    "list_dir": ["cmd", "/c", "dir"],
+    "git_status": [_GIT or "git", "--no-optional-locks", "-c", "core.fsmonitor=false", "status"],
+    "python_version": [sys.executable or "python", "--version"],
+    "list_dir": [str(_CMD), "/c", "dir"],
 }
 
 
@@ -244,7 +285,9 @@ def _run_bounded(argv: list[str], *, timeout: float = COMMAND_TIMEOUT_SECONDS,
         return "คำสั่งทำงานนานเกินกำหนด จึงถูกยกเลิก"
     finally:
         reader.join(timeout=5)
-        process.stdout.close()
+        # A grandchild may still hold the pipe; closing it now blocks until that process exits.
+        if not reader.is_alive():
+            process.stdout.close()
     text = bytes(kept).decode(locale.getpreferredencoding(False), errors="replace")
     if truncated:
         text += "\n[output truncated]"
@@ -293,12 +336,21 @@ MCP_SECRET = _load_secret()
 
 
 class _SecretRedactor(logging.Filter):
-    """Keep the secret-bearing URL out of the uvicorn access log line."""
+    """Keep the secret-bearing URL out of the uvicorn access log line.
+
+    uvicorn's AccessFormatter unpacks record.args, so args must keep its shape.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if MCP_SECRET and MCP_SECRET in message:
-            record.msg, record.args = message.replace(MCP_SECRET, "<redacted>"), None
+        if MCP_SECRET:
+            if isinstance(record.msg, str) and MCP_SECRET in record.msg:
+                record.msg = record.msg.replace(MCP_SECRET, "<redacted>")
+            if isinstance(record.args, tuple):
+                record.args = tuple(
+                    argument.replace(MCP_SECRET, "<redacted>")
+                    if isinstance(argument, str) else argument
+                    for argument in record.args
+                )
         return True
 
 
@@ -308,7 +360,6 @@ def make_app():
     kwargs["transport_security"] = build_transport_security_settings()
     inner = mcp.streamable_http_app(**kwargs)
     url_prefix = f"/{MCP_SECRET}".encode()
-    bearer = b"Bearer " + url_prefix[1:]
     not_found = PlainTextResponse("Not Found", status_code=404)
     logging.getLogger("uvicorn.access").addFilter(_SecretRedactor())
 
@@ -321,7 +372,9 @@ def make_app():
             rest = path[len(url_prefix):]
         elif url_prefix and (path == b"/mcp" or path.startswith(b"/mcp/")):
             auth = dict(scope.get("headers") or []).get(b"authorization", b"")
-            if not hmac.compare_digest(auth, bearer):
+            scheme, _, token = auth.partition(b" ")
+            # RFC 9110: the auth scheme is case-insensitive.
+            if scheme.lower() != b"bearer" or not hmac.compare_digest(token.strip(), url_prefix[1:]):
                 return await not_found(scope, receive, send)
             return await inner(scope, receive, send)
         if rest is None or not (rest == b"/mcp" or rest.startswith(b"/mcp/")):
