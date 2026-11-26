@@ -15,7 +15,7 @@ start.bat
 ```
 
 The download client rejects non-public DNS answers (including the IPv6
-translation prefixes `64:ff9b::/96` and `2002::/16`, which can carry a
+translation prefixes `64:ff9b::/96`, `2002::/16` and `::ffff:0:0:0/96`, which can carry a
 private IPv4 address), embedded URL credentials, non-standard ports, and
 redirects. The response is capped at 25 MiB by default.
 Operators can adjust the cap with `MCP_MAX_DOWNLOAD_BYTES` and the network
@@ -72,7 +72,9 @@ not the application directory. The application directory is `sys.path[0]` and
 holds the dependency and CI configuration of the server itself, so MCP never
 writes there by default. Set `MCP_WORKSPACE` to point the tools at another
 folder. A relative `MCP_WORKSPACE` resolves against the application folder,
-not against the directory the server was started from. The server refuses to
+not against the directory the server was started from. A drive-relative
+value such as `D:sub` or `D:` is refused, because Windows would resolve it
+against the live or remembered directory of that drive. The server refuses to
 start when that folder is a filesystem root or the user's home directory; use
 a dedicated folder for AI output. The guard compares the resolved path as a
 string after removing the Windows `\\?\` prefix. It does not map UNC admin
@@ -85,12 +87,13 @@ compared case-insensitively and support globs:
 
 - Server secrets: `.mcp_secret`, `.mcp_secret.*`, `.tunnel_token`, `.tunnel_token.*`, `.git`.
 - Environment files: `.env*` (`.env.local`, `.env.production`, `.envrc`) and
-  `*.env`, `*.env.*` (`prod.env`, `prod.env.bak`).
+  `*.env*` (`prod.env`, `prod.env.bak`, `prod.env~`, `#prod.env#`).
 - Credential stores: `.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`, `.docker`,
   `.netrc`, `_netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.gitconfig`,
   `.vault-token`, `.pgpass`, `.htpasswd`.
-- Key material: `id_rsa*`, `id_dsa*`, `id_dss*`, `id_ed25519*`, `id_ecdsa*`,
-  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.ppk`, `*.kdbx`.
+- Key material: `id_rsa*`, `id_dsa*`, `id_dss*`, `id_xmss*`, `id_ed25519*`,
+  `id_ecdsa*`, `private-key*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
+  `*.keystore`, `*.ppk`, `*.kdbx`.
 - Write staging: `.mcp-tmp-*`, so an in-flight or crashed write is not readable.
 
 Hidden names cannot be read, written, or listed. Other secrets inside the
@@ -128,16 +131,20 @@ Writes are refused in two cases.
    `setup.cfg`, `Pipfile*`, `poetry.lock`, `uv.lock`, `package.json`,
    `*-lock.json`, `*-lock.yaml`, `yarn.lock`, `bun.lock`, `.yarnrc.yml`,
    `.npmrc`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `go.mod`, `go.sum`,
-   `Gemfile*`, `composer.json`, `composer.lock`, `Podfile`), CI
+   `go.work`, `Gemfile*`, `composer.json`, `composer.lock`, `Podfile`,
+   `Podfile.lock`, `pubspec.lock`, `gradle.lockfile`, `packages.config`,
+   `nuget.config`), CI
    configuration (`.github`, `.gitlab`, `.gitlab-ci.yml`, `.circleci`,
    `.buildkite`, `.gitea`, `.forgejo`, `Jenkinsfile`, `.travis.yml`,
    `appveyor.yml`, `azure-pipelines.yml`, `.drone.yml`, `.woodpecker.yml`,
-   `.pre-commit-config.yaml`), build files (`Makefile`, `Dockerfile*`,
-   `docker-compose*.yml`, `compose.yaml`, `Containerfile`, `pom.xml`,
-   `build.gradle*`, `CMakeLists.txt`, `configure`, `configure.ac`,
-   `meson.build`, `Rakefile`, `flake.nix`, `shell.nix`, `default.nix`),
+   `.pre-commit-config.yaml`, `.husky`, `lefthook.yml`), build files
+   (`Makefile`, `Dockerfile*`, `docker-compose*.yml`, `compose*.yaml`,
+   `Containerfile`, `pom.xml`, `build.gradle*`, `CMakeLists.txt`,
+   `configure`, `configure.ac`, `configure.in`, `meson.build`, `Rakefile`,
+   `Justfile`, `.justfile`, `Taskfile.yml`, `Taskfile.yaml`, `flake.nix`,
+   `shell.nix`, `default.nix`, `Directory.Build.props`),
    editor and tool configuration that runs commands (`.vscode`, `.claude`,
-   `.cargo`, `*.code-workspace`, `vite.config.*`, `next.config.*`),
+   `.cargo`, `*.code-workspace`, `*.config.ts`, `*.config.mts`),
    `.gitmodules`, `.envrc`, and shell or interpreter startup files (`.bashrc`,
    `.bash_profile`, `.profile`, `.zshrc`, `.zshenv`, `.Rprofile`, `.Renviron`,
    `.gdbinit`).
@@ -146,10 +153,10 @@ The name list is not exhaustive. It covers the files that common tooling
 executes automatically; review what the AI wrote before you commit, build,
 or install.
 
-The Bazel root files `BUILD` and `WORKSPACE` are deliberately not blocked by
-name. The check applies to every path component, so blocking those two names
-would also block any directory called `build` or `workspace`. Review Bazel
-files by hand.
+The Bazel files `BUILD`, `WORKSPACE`, `MODULE.bazel` and `WORKSPACE.bazel`
+are blocked as the last path component only, so a directory called `build`
+or `workspace` stays writable. `.bazelversion` and files such as `BUILD.pkg`
+are not blocked; review Bazel files by hand.
 
 Limits are positive integers read from the environment at startup:
 
@@ -194,8 +201,10 @@ Residual risks:
 `run_allowed_command` runs a fixed argv list (no shell) with `cwd` set to the
 workspace, a hard timeout (`MCP_COMMAND_TIMEOUT`), output capped at 256 KiB,
 and `MCP_SECRET` removed from the child environment. The executables are
-resolved to absolute paths at startup (`git` and `ls` through `PATH`, the
-running interpreter for `python_version`, and
+resolved to absolute paths at startup (`git` and `ls` from the absolute
+directories in `PATH` only, relative `PATH` entries are skipped, because
+`shutil.which` on Windows searches the startup directory first; the running
+interpreter for `python_version`, and
 `%SystemRoot%\System32\cmd.exe` for `list_dir` on Windows), because
 Win32 `CreateProcess` searches the current directory before `PATH`; an
 executable placed inside a workspace is never picked up. On Linux and
