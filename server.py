@@ -133,7 +133,7 @@ def write_file(filename: str, content: str) -> str:
     # 2. รองรับการบันทึกไฟล์ไบนารี/รูปภาพผ่าน Prefix [BASE64]:
     if content.startswith("[BASE64]:"):
         b64_str = content[len("[BASE64]:"):].strip()
-        raw_bytes = base64.b64decode(b64_str)
+        raw_bytes = _decode_base64_limited(b64_str)
         atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES)
         return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
