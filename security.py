@@ -72,8 +72,8 @@ def validate_download_url(url: str) -> str:
 def download_url(url: str, *, max_bytes: int | None = None,
                  timeout: int | None = None) -> bytes:
     validate_download_url(url)
-    limit = max_bytes or int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", DEFAULT_MAX_DOWNLOAD_BYTES))
-    request_timeout = timeout or int(os.getenv("MCP_DOWNLOAD_TIMEOUT", DEFAULT_DOWNLOAD_TIMEOUT))
+    limit = int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", DEFAULT_MAX_DOWNLOAD_BYTES)) if max_bytes is None else max_bytes
+    request_timeout = int(os.getenv("MCP_DOWNLOAD_TIMEOUT", DEFAULT_DOWNLOAD_TIMEOUT)) if timeout is None else timeout
     if limit <= 0 or request_timeout <= 0:
         raise DownloadSecurityError("ค่าจำกัดขนาดหรือ timeout ต้องมากกว่า 0")
 
@@ -88,10 +88,13 @@ def download_url(url: str, *, max_bytes: int | None = None,
             length = response.headers.get("Content-Length")
             if length:
                 try:
-                    if int(length) > limit:
-                        raise DownloadSecurityError("ไฟล์ดาวน์โหลดมีขนาดเกินกำหนด")
-                except ValueError:
+                    declared_length = int(length)
+                except ValueError as exc:
+                    raise DownloadSecurityError("Content-Length ไม่ถูกต้อง") from exc
+                if declared_length < 0:
                     raise DownloadSecurityError("Content-Length ไม่ถูกต้อง")
+                if declared_length > limit:
+                    raise DownloadSecurityError("ไฟล์ดาวน์โหลดมีขนาดเกินกำหนด")
             data = response.read(limit + 1)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
