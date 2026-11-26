@@ -227,14 +227,19 @@ class ToolPolicyTests(unittest.TestCase):
                    ".vscode/tasks.json", ".cargo/config.toml", ".claude/settings.json",
                    "x.code-workspace", "pom.xml", "compose.yaml", "compose.override.yaml",
                    "flake.nix", "vitest.config.ts", ".justfile", "Taskfile.yaml",
-                   "configure.in", "Podfile.lock", "go.work", "pubspec.lock",
+                   "configure.in", "Podfile.lock", "go.work", "pubspec.yaml", "pubspec.lock",
                    "gradle.lockfile", "nuget.config", "packages.config",
                    "Directory.Build.props", ".husky/pre-commit", "lefthook.yml",
+                   "lefthook.yaml", ".lefthook.yml", "lefthook-local.yml", ".huskyrc",
+                   ".huskyrc.json", "Taskfile.dist.yml", "settings.gradle",
+                   "settings.gradle.kts", "gradle.properties", "Directory.Build.targets",
+                   "Directory.Packages.props", "packages.lock.json", "vitest.workspace.ts",
                    "MODULE.bazel", "WORKSPACE.bazel")
         for name in blocked:
             with self.assertRaises(ValueError, msg=name):
                 server.write_file(name, "x")
-        for name in ("README.md", "notes.txt", "app.ts", "src/main.rs", "config.yaml"):
+        for name in ("README.md", "notes.txt", "app.ts", "src/main.rs", "config.yaml",
+                     "prod.environment", "x.envoy", "app.environment.md"):
             server.write_file(name, "x")
             self.assertEqual(server.read_file(name), "x")
         for name in ("build/out.txt", "workspace/notes.txt", "BUILD.notes.md"):
@@ -246,7 +251,8 @@ class ToolPolicyTests(unittest.TestCase):
         for pattern, relative in _sample_paths(server.BLOCKED_WRITE_NAMES):
             with self.assertRaises(ValueError, msg=pattern):
                 server.write_file(relative, "x")
-        for name in ("BUILD", "sub/WORKSPACE", "MODULE.bazel", "WORKSPACE.bazel"):
+        for name in ("BUILD", "sub/WORKSPACE", "MODULE.bazel", "WORKSPACE.bazel",
+                     "sub/WORKSPACE.bzlmod", ".bazeliskrc", ".bazelversion", "MODULE.bazel.lock"):
             with self.assertRaises(ValueError, msg=name):
                 server.write_file(name, "x")
         # Directory spelled like the Bazel file stays usable.
@@ -350,22 +356,39 @@ class CommandTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("whoami"), "Windows whoami.exe")
     def test_executable_is_not_resolved_from_the_startup_directory(self):
-        real = server.resolve_executable("whoami")
-        self.assertTrue(real and Path(real).is_absolute())
+        system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        real_whoami = system32 / "whoami.exe"
+        self.assertTrue(real_whoami.is_file())
         holder = Path(tempfile.mkdtemp(prefix="gpm-cwd-"))
         previous = os.getcwd()
         # Without this variable Windows (and shutil.which on 3.12+) searches the startup directory.
         search_flag = os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+        # Pin PATH so the result does not depend on where System32 sits in the ambient PATH.
+        saved_path = os.environ["PATH"]
         try:
-            shutil.copy(shutil.which("whoami"), holder / "whoami.bat")
+            shutil.copy(real_whoami, holder / "whoami.bat")
             os.chdir(holder)
+            expected = str(real_whoami.resolve())
+            for path_value in (f"{holder}{os.pathsep}{system32}", f"{system32}{os.pathsep}{holder}"):
+                os.environ["PATH"] = path_value
+                self.assertEqual(server.resolve_executable("whoami"), expected, path_value)
+            # No PATH directory holds the program: the planted copy in the startup directory must not win.
+            empty = Path(tempfile.mkdtemp(prefix="gpm-empty-"))
+            try:
+                for path_value in (str(empty), f"{empty}{os.pathsep}{holder}"):
+                    os.environ["PATH"] = path_value
+                    self.assertIsNone(server.resolve_executable("whoami"), path_value)
+            finally:
+                shutil.rmtree(empty, ignore_errors=True)
+            os.environ["PATH"] = f"{empty}{os.pathsep}{system32}"
             found = server.resolve_executable("whoami")
         finally:
             os.chdir(previous)
+            os.environ["PATH"] = saved_path
             if search_flag is not None:
                 os.environ["NoDefaultCurrentDirectoryInExePath"] = search_flag
             shutil.rmtree(holder, ignore_errors=True)
-        self.assertEqual(found, real)
+        self.assertEqual(found, expected)
 
     @unittest.skipUnless(os.name != "nt", "POSIX ls")
     def test_posix_list_dir_uses_absolute_ls(self):

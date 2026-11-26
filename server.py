@@ -110,7 +110,7 @@ def safe_path(rel_path: str) -> Path:
 # เทียบชื่อแบบไม่สนตัวพิมพ์ และรองรับ glob เพราะ .env.local หรือ prod.env ก็เป็นไฟล์ลับเหมือน .env
 HIDDEN_NAMES = {
     ".tunnel_token", ".tunnel_token.*", ".mcp_secret", ".mcp_secret.*", ".git",
-    ".env*", "*.env*",
+    ".env*", "*.env", "*.env.*", "*.env~*", "#*.env#*",
     ".ssh", ".aws", ".gnupg", ".kube", ".docker",
     ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".gitconfig",
     "id_rsa*", "id_ed25519*", "id_ecdsa*", "*.pem", "*.key", "*.p12", "*.pfx",
@@ -142,19 +142,27 @@ BLOCKED_WRITE_NAMES = {
     ".vscode", ".claude", ".cargo", "*.code-workspace",
     "pom.xml", "build.gradle", "build.gradle.kts", "build.sbt", "cmakelists.txt", "configure",
     "configure.ac", "configure.in", "meson.build", "rakefile", "sconstruct", "build.bazel", "justfile",
-    ".justfile", "taskfile.yml", "taskfile.yaml", "flake.nix", "shell.nix", "default.nix", ".bazelrc",
+    ".justfile", "taskfile*.yml", "taskfile*.yaml", "flake.nix", "shell.nix", "default.nix", ".bazelrc",
     "bitbucket-pipelines.yml", ".woodpecker.yml", "cloudbuild.yaml", ".gitea", ".forgejo",
     "bun.lock", "bun.lockb", "npm-shrinkwrap.json", "composer.json", "composer.lock",
     "pnpm-workspace.yaml", "bunfig.toml", "uv.toml", "podfile", "podfile.lock", "*.gemspec",
-    "compose*.yaml", "compose*.yml", "containerfile", "go.work", "pubspec.lock", "gradle.lockfile",
-    "nuget.config", "packages.config", "directory.build.props", ".husky", "lefthook.yml",
-    ".rprofile", ".renviron", ".gdbinit", "*.config.ts", "*.config.mts",
+    "compose*.yaml", "compose*.yml", "containerfile", "go.work", "pubspec.yaml", "pubspec.lock",
+    "gradle.lockfile", "gradle.properties", "settings.gradle", "settings.gradle.kts",
+    "nuget.config", "packages.config", "packages.lock.json", "directory.build.props",
+    "directory.build.targets", "directory.build.rsp", "directory.packages.props",
+    ".husky", ".huskyrc", ".huskyrc.*", "*lefthook*.yml", "*lefthook*.yaml",
+    ".rprofile", ".renviron", ".gdbinit", "*.config.ts", "*.config.mts", "*.workspace.ts",
     ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv",
     ".zlogin", ".zlogout", ".zprofile", ".kshrc", ".cshrc", ".tcshrc", ".login", ".logout",
 }
 
 # ไฟล์รากของ Bazel ตรวจเฉพาะ component สุดท้าย เพราะ build/ กับ workspace/ เป็นชื่อโฟลเดอร์ปกติ
-BLOCKED_WRITE_FILE_NAMES = {"build", "workspace", "module.bazel", "workspace.bazel"}
+# WORKSPACE.bzlmod มี syntax เดียวกับ WORKSPACE และถูกอ่านแทน WORKSPACE เมื่อเปิด bzlmod
+# .bazeliskrc กับ .bazelversion สั่ง Bazelisk ดาวน์โหลด binary ของ Bazel จากแหล่งที่ไฟล์กำหนด
+BLOCKED_WRITE_FILE_NAMES = {
+    "build", "workspace", "module.bazel", "module.bazel.lock", "workspace.bazel",
+    "workspace.bzlmod", ".bazeliskrc", ".bazelversion",
+}
 
 def writable_path(rel_path: str) -> Path:
     target = safe_path(rel_path)
@@ -281,10 +289,14 @@ def resolve_executable(name: str) -> str | None:
     try:
         os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
         for directory in os.environ.get("PATH", "").split(os.pathsep):
-            if directory and Path(directory).is_absolute():
-                found = shutil.which(name, path=directory + os.pathsep + os.curdir)
-                if found and Path(found).is_absolute():
-                    return str(Path(found).resolve())
+            # ข้ามรายการที่เป็น "." หรือโฟลเดอร์เดียวกับ cwd: ผู้ใช้ตั้งไว้เองก็ไม่ควรให้ executable ของเครื่องมือมาจากที่นั่น
+            if not directory or not Path(directory).is_absolute():
+                continue
+            if Path(directory).resolve() == Path.cwd().resolve():
+                continue
+            found = shutil.which(name, path=directory + os.pathsep + os.curdir)
+            if found and Path(found).is_absolute():
+                return str(Path(found).resolve())
         return None
     finally:
         if flag is None:
