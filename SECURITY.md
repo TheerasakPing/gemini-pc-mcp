@@ -166,10 +166,14 @@ Residual risks:
 `run_allowed_command` runs a fixed argv list (no shell) with `cwd` set to the
 workspace, a hard timeout (`MCP_COMMAND_TIMEOUT`), output capped at 256 KiB,
 and `MCP_SECRET` removed from the child environment. The executables are
-resolved to absolute paths at startup (`git` through `PATH`, the running
-interpreter for `python_version`, `%SystemRoot%\System32\cmd.exe`), because
+resolved to absolute paths at startup (`git` and `ls` through `PATH`, the
+running interpreter for `python_version`, and
+`%SystemRoot%\System32\cmd.exe` for `list_dir` on Windows), because
 Win32 `CreateProcess` searches the current directory before `PATH`; an
-executable placed inside a workspace is never picked up. A process that the
+executable placed inside a workspace is never picked up. On Linux and
+macOS `list_dir` runs `ls` instead of `cmd.exe`. A program that is not
+installed leaves its command disabled with an error; the server never
+falls back to a bare name. A process that the
 command leaves behind keeps the output pipe open, and the server then
 returns after 5 seconds instead of waiting for it. `git_status` runs with
 `--no-optional-locks -c core.fsmonitor=false` so a repository-controlled
