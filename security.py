@@ -15,6 +15,10 @@ from urllib.parse import urlsplit
 
 DEFAULT_MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 DEFAULT_DOWNLOAD_TIMEOUT = 20
+# IPv6 translation prefixes that can carry a private IPv4 address: NAT64 and 6to4.
+_TRANSLATED_NETWORKS = tuple(
+    ipaddress.ip_network(network) for network in ("64:ff9b::/96", "2002::/16")
+)
 
 
 class DownloadSecurityError(ValueError):
@@ -38,7 +42,7 @@ def _resolve_public_addresses(hostname: str) -> list[str]:
     addresses: list[str] = []
     for record in records:
         address = ipaddress.ip_address(record[4][0].split("%", 1)[0])
-        if not address.is_global:
+        if not address.is_global or any(address in network for network in _TRANSLATED_NETWORKS):
             raise DownloadSecurityError("ปฏิเสธปลายทางที่ resolve ไปยัง IP ภายในหรือ IP พิเศษ")
         normalized = str(address)
         if normalized not in addresses:

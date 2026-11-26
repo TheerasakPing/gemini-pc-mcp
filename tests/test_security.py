@@ -46,6 +46,15 @@ class DownloadValidationTests(unittest.TestCase):
         with self.assertRaises(DownloadSecurityError):
             _resolve_public_addresses("files.example.com")
 
+    @patch("security.socket.getaddrinfo")
+    def test_rejects_translated_addresses_hiding_private_ipv4(self, getaddrinfo):
+        for address in ("64:ff9b::7f00:1", "2002:7f00:1::"):
+            getaddrinfo.return_value = [(10, 1, 6, "", (address, 443, 0, 0))]
+            with self.assertRaises(DownloadSecurityError, msg=address):
+                _resolve_public_addresses("files.example.com")
+        getaddrinfo.return_value = [(10, 1, 6, "", ("2607:f8b0::1", 443, 0, 0))]
+        self.assertEqual(_resolve_public_addresses("files.example.com"), ["2607:f8b0::1"])
+
     @patch("security._PinnedHTTPSConnection")
     @patch("security._resolve_public_addresses", return_value=["8.8.8.8"])
     def test_download_uses_validated_ip(self, resolve, connection_class):
