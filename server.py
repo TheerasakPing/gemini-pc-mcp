@@ -86,6 +86,24 @@ def writable_path(rel_path: str) -> Path:
         raise ValueError(f"ไม่อนุญาตให้เขียนไฟล์ชนิด {target.suffix} ผ่าน MCP")
     return target
 
+MAX_FILE_BYTES = int(os.getenv("MCP_MAX_FILE_BYTES", str(25 * 1024 * 1024)))
+
+def _decode_base64_limited(encoded: str) -> bytes:
+    compact = encoded.strip()
+    if len(compact) > ((MAX_FILE_BYTES + 2) // 3) * 4 + 8:
+        raise ValueError("ข้อมูล Base64 มีขนาดเกินขีดจำกัด")
+    try:
+        data = base64.b64decode(compact, validate=True)
+    except Exception as exc:
+        raise ValueError("ข้อมูล Base64 ไม่ถูกต้อง") from exc
+    if len(data) > MAX_FILE_BYTES:
+        raise ValueError("ไฟล์มีขนาดเกินขีดจำกัด")
+    return data
+
+def _check_file_size(size: int) -> None:
+    if size > MAX_FILE_BYTES:
+        raise ValueError("ไฟล์มีขนาดเกินขีดจำกัด")
+
 @mcp.tool()
 def list_files() -> list[str]:
     """แสดงรายชื่อไฟล์ทั้งหมดในโฟลเดอร์ทำงานบน PC"""
@@ -94,7 +112,10 @@ def list_files() -> list[str]:
 @mcp.tool()
 def read_file(filename: str) -> str:
     """อ่านเนื้อหาไฟล์ข้อความในโฟลเดอร์ทำงาน"""
-    return safe_path(filename).read_text(encoding="utf-8")
+    path = safe_path(filename)
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise ValueError("ไฟล์มีขนาดเกินขีดจำกัดการอ่าน")
+    return path.read_text(encoding="utf-8")
 
 @mcp.tool()
 def write_file(filename: str, content: str) -> str:
@@ -105,7 +126,7 @@ def write_file(filename: str, content: str) -> str:
     # 1. รองรับการต่อไฟล์ไบนารีทีละส่วน (Chunked Base64 Append) สำหรับไฟล์ภาพขนาดใหญ่
     if content.startswith("[APPEND_BASE64]:"):
         b64_str = content[len("[APPEND_BASE64]:"):].strip()
-        raw_bytes = base64.b64decode(b64_str)
+        raw_bytes = _decode_base64_limited(b64_str)
         total = atomic_write(path, raw_bytes, append=True)
         return f"เพิ่มข้อมูลไบนารีลงในไฟล์ {filename} เรียบร้อยแล้ว (+{len(raw_bytes)} bytes, รวม {total} bytes)"
 
@@ -124,7 +145,9 @@ def write_file(filename: str, content: str) -> str:
         return f"บันทึกไฟล์รูปภาพ/ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
     # 4. บันทึกไฟล์ข้อความปกติ (UTF-8)
-    atomic_write(path, content.encode("utf-8"))
+    raw_bytes = content.encode("utf-8")
+    _check_file_size(len(raw_bytes))
+    atomic_write(path, raw_bytes)
     return f"บันทึกไฟล์ข้อความ {filename} เรียบร้อยแล้ว (ขนาด {len(content)} ตัวอักษร)"
 
 @mcp.tool()
@@ -134,7 +157,7 @@ def write_binary_file(filename: str, base64_data: str, append: bool = False) -> 
     path.parent.mkdir(parents=True, exist_ok=True)
     if base64_data.startswith("data:") and ";base64," in base64_data[:120]:
         base64_data = base64_data.split(";base64,", 1)[1]
-    raw_bytes = base64.b64decode(base64_data.strip())
+    raw_bytes = _decode_base64_limited(base64_data)
     total = atomic_write(path, raw_bytes, append=append)
     return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาดรวม {total} bytes)"
 
@@ -143,7 +166,7 @@ def download_file_from_url(filename: str, url: str) -> str:
     """ดาวน์โหลดไฟล์หรือรูปภาพจาก URL มาเก็บไว้ในโฟลเดอร์ทำงานบน PC"""
     path = writable_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = download_url(url)
+    data = download_url(url, max_bytes=MAX_FILE_BYTES)
     atomic_write(path, data)
     return f"ดาวน์โหลดไฟล์ {filename} จาก URL เรียบร้อยแล้ว (ขนาด {len(data)} bytes)"
 
