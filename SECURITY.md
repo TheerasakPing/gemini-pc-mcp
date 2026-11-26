@@ -87,8 +87,9 @@ compared case-insensitively and support globs:
 
 - Server secrets: `.mcp_secret`, `.mcp_secret.*`, `.tunnel_token`, `.tunnel_token.*`, `.git`.
 - Environment files: `.env*` (`.env.local`, `.env.production`, `.envrc`),
-  `*.env`, `*.env.*`, `*.env~*` and `#*.env#*` (`prod.env`, `prod.env.bak`,
-  `prod.env~`, `#prod.env#`). Names such as `prod.environment` stay readable.
+  `*.env`, `*.env[-._~#0-9]*` and `#*.env#*` (`prod.env`, `prod.env.bak`,
+  `prod.env-old`, `prod.env_1`, `prod.env2`, `prod.env~`, `prod.env#`,
+  `#prod.env#`). Names such as `prod.environment` stay readable.
 - Credential stores: `.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`, `.docker`,
   `.netrc`, `_netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.gitconfig`,
   `.vault-token`, `.pgpass`, `.htpasswd`.
@@ -133,7 +134,8 @@ Writes are refused in two cases.
    `*-lock.json`, `*-lock.yaml`, `yarn.lock`, `bun.lock`, `.yarnrc.yml`,
    `.npmrc`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `go.mod`, `go.sum`,
    `go.work`, `Gemfile*`, `composer.json`, `composer.lock`, `Podfile`,
-   `Podfile.lock`, `pubspec.yaml`, `pubspec.lock`, `gradle.lockfile`,
+   `Podfile.lock`, `pubspec.yaml`, `pubspec_overrides.yaml`, `pubspec.lock`,
+   `gradle.lockfile`,
    `gradle.properties`, `settings.gradle`, `settings.gradle.kts`,
    `packages.config`, `packages.lock.json`, `nuget.config`), CI
    configuration (`.github`, `.gitlab`, `.gitlab-ci.yml`, `.circleci`,
@@ -149,7 +151,7 @@ Writes are refused in two cases.
    `Directory.Build.targets`, `Directory.Build.rsp`, `Directory.Packages.props`),
    editor and tool configuration that runs commands (`.vscode`, `.claude`,
    `.cargo`, `*.code-workspace`, `*.config.ts`, `*.config.mts`,
-   `*.workspace.ts`),
+   `*.workspace.ts`, `*.workspace.mts`, `*.workspace.json`),
    `.gitmodules`, `.envrc`, and shell or interpreter startup files (`.bashrc`,
    `.bash_profile`, `.profile`, `.zshrc`, `.zshenv`, `.Rprofile`, `.Renviron`,
    `.gdbinit`).

@@ -3,6 +3,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -42,6 +43,8 @@ def _sample_paths(patterns):
     """ชื่อตัวอย่างสำหรับทดสอบ: แทน * ด้วย sample และใช้เป็นโฟลเดอร์ถ้าไม่มีนามสกุล"""
     for pattern in sorted(patterns):
         sample = pattern.replace("*", "sample")
+        # A character class matches one character; use its first member.
+        sample = re.sub(r"\[([^\]]+)\]", lambda match: match.group(1)[0], sample)
         yield pattern, sample if Path(sample).suffix else f"{sample}/x.txt"
 
 
@@ -196,7 +199,8 @@ class ToolPolicyTests(unittest.TestCase):
     def test_hidden_patterns_block_read_write_and_list(self):
         folder = Path(tempfile.mkdtemp(dir=self.workspace))
         try:
-            names = [".env", ".ENV.local", "prod.env", "prod.env.bak", ".mcp_secret.bak",
+            names = [".env", ".ENV.local", "prod.env", "prod.env.bak", "prod.env-old",
+                     "prod.env-old.bak", "prod.env_1", "prod.env2", "prod.env#", ".mcp_secret.bak",
                      ".TUNNEL_TOKEN.bak", ".gitconfig", "server.key", "id_dsa", "id_dss",
                      "cert.jks", ".vault-token", ".mcp-tmp-abc"]
             for name in names:
@@ -234,7 +238,8 @@ class ToolPolicyTests(unittest.TestCase):
                    ".huskyrc.json", "Taskfile.dist.yml", "settings.gradle",
                    "settings.gradle.kts", "gradle.properties", "Directory.Build.targets",
                    "Directory.Packages.props", "packages.lock.json", "vitest.workspace.ts",
-                   "MODULE.bazel", "WORKSPACE.bazel")
+                    "MODULE.bazel", "WORKSPACE.bazel", "vitest.workspace.mts",
+                    "vitest.workspace.json", "pubspec_overrides.yaml")
         for name in blocked:
             with self.assertRaises(ValueError, msg=name):
                 server.write_file(name, "x")
@@ -252,7 +257,8 @@ class ToolPolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=pattern):
                 server.write_file(relative, "x")
         for name in ("BUILD", "sub/WORKSPACE", "MODULE.bazel", "WORKSPACE.bazel",
-                     "sub/WORKSPACE.bzlmod", ".bazeliskrc", ".bazelversion", "MODULE.bazel.lock"):
+                     "WORKSPACE.bzlmod", "sub/WORKSPACE.bzlmod", ".bazeliskrc",
+                     ".bazelversion", "MODULE.bazel.lock"):
             with self.assertRaises(ValueError, msg=name):
                 server.write_file(name, "x")
         # Directory spelled like the Bazel file stays usable.
@@ -265,7 +271,9 @@ class ToolPolicyTests(unittest.TestCase):
                 server.read_file(relative)
             with self.assertRaises(ValueError, msg=pattern):
                 server.write_file(relative, "x")
-        for name in ("prod.env~", "#prod.env#", "prod.env~1", "id_xmss", "private-key.asc"):
+        for name in ("prod.env~", "#prod.env#", "prod.env~1", "prod.env-old",
+                     "prod.env-old.bak", "prod.env_1", "prod.env2", "prod.env#", "id_xmss",
+                     "private-key.asc"):
             with self.assertRaises(ValueError, msg=name):
                 server.read_file(name)
 

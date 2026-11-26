@@ -110,7 +110,7 @@ def safe_path(rel_path: str) -> Path:
 # เทียบชื่อแบบไม่สนตัวพิมพ์ และรองรับ glob เพราะ .env.local หรือ prod.env ก็เป็นไฟล์ลับเหมือน .env
 HIDDEN_NAMES = {
     ".tunnel_token", ".tunnel_token.*", ".mcp_secret", ".mcp_secret.*", ".git",
-    ".env*", "*.env", "*.env.*", "*.env~*", "#*.env#*",
+    ".env*", "*.env", "*.env[-._~#0-9]*", "#*.env#*",
     ".ssh", ".aws", ".gnupg", ".kube", ".docker",
     ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".gitconfig",
     "id_rsa*", "id_ed25519*", "id_ecdsa*", "*.pem", "*.key", "*.p12", "*.pfx",
@@ -147,11 +147,13 @@ BLOCKED_WRITE_NAMES = {
     "bun.lock", "bun.lockb", "npm-shrinkwrap.json", "composer.json", "composer.lock",
     "pnpm-workspace.yaml", "bunfig.toml", "uv.toml", "podfile", "podfile.lock", "*.gemspec",
     "compose*.yaml", "compose*.yml", "containerfile", "go.work", "pubspec.yaml", "pubspec.lock",
+    "pubspec_overrides.yaml",
     "gradle.lockfile", "gradle.properties", "settings.gradle", "settings.gradle.kts",
     "nuget.config", "packages.config", "packages.lock.json", "directory.build.props",
     "directory.build.targets", "directory.build.rsp", "directory.packages.props",
     ".husky", ".huskyrc", ".huskyrc.*", "*lefthook*.yml", "*lefthook*.yaml",
     ".rprofile", ".renviron", ".gdbinit", "*.config.ts", "*.config.mts", "*.workspace.ts",
+    "*.workspace.mts", "*.workspace.json",
     ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv",
     ".zlogin", ".zlogout", ".zprofile", ".kshrc", ".cshrc", ".tcshrc", ".login", ".logout",
 }
