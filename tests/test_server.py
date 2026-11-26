@@ -354,12 +354,16 @@ class CommandTests(unittest.TestCase):
         self.assertTrue(real and Path(real).is_absolute())
         holder = Path(tempfile.mkdtemp(prefix="gpm-cwd-"))
         previous = os.getcwd()
+        # Without this variable Windows (and shutil.which on 3.12+) searches the startup directory.
+        search_flag = os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
         try:
             shutil.copy(shutil.which("whoami"), holder / "whoami.bat")
             os.chdir(holder)
             found = server.resolve_executable("whoami")
         finally:
             os.chdir(previous)
+            if search_flag is not None:
+                os.environ["NoDefaultCurrentDirectoryInExePath"] = search_flag
             shutil.rmtree(holder, ignore_errors=True)
         self.assertEqual(found, real)
 

@@ -274,14 +274,23 @@ def download_file_from_url(filename: str, url: str) -> str:
 # และ POSIX ที่มี "." อยู่ใน PATH ก็เสี่ยงแบบเดียวกัน หาโปรแกรมไม่เจอให้เก็บ None ห้าม fallback เป็นชื่อเปล่า
 def resolve_executable(name: str) -> str | None:
     """คืน absolute path ของโปรแกรมจาก PATH หรือ None ถ้าไม่มี ไม่ค้นโฟลเดอร์ปัจจุบัน"""
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        # shutil.which บน Windows แทรกโฟลเดอร์ปัจจุบันไว้หน้า PATH เว้นแต่ "." อยู่ในรายการแล้ว
-        # จึงใส่ "." ต่อท้ายทุกครั้ง แล้วรับเฉพาะผลที่เป็น absolute path (มาจาก directory ไม่ใช่ ".")
-        if directory and Path(directory).is_absolute():
-            found = shutil.which(name, path=directory + os.pathsep + os.curdir)
-            if found and Path(found).is_absolute():
-                return str(Path(found).resolve())
-    return None
+    # shutil.which บน Windows แทรกโฟลเดอร์ปัจจุบันไว้หน้า PATH: Python 3.11 ข้ามถ้า "." อยู่ในรายการแล้ว
+    # แต่ 3.12+ ตัดสินจาก NoDefaultCurrentDirectoryInExePath แทน จึงตั้งตัวแปรชั่วคราวและใส่ "." ต่อท้ายครบทั้งสองแบบ
+    # แล้วรับเฉพาะผลที่เป็น absolute path (มาจาก directory ไม่ใช่ ".")
+    flag = os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+    try:
+        os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            if directory and Path(directory).is_absolute():
+                found = shutil.which(name, path=directory + os.pathsep + os.curdir)
+                if found and Path(found).is_absolute():
+                    return str(Path(found).resolve())
+        return None
+    finally:
+        if flag is None:
+            os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+        else:
+            os.environ["NoDefaultCurrentDirectoryInExePath"] = flag
 
 def build_allowed_commands(platform: str = os.name) -> dict:
     """ตารางคำสั่งที่อนุญาต ผูก executable ตอนสร้าง ไม่ใช่ตอนเรียกใช้"""
