@@ -72,6 +72,12 @@ if exist ".tunnel_token" (
     echo  Keep the secret private. Anyone with it can use your tools.
     echo ========================================================
     echo.
+    echo  NOTE: the server checks the Host header. Once the tunnel shows its
+    echo        hostname, close the server window, then in a new window run:
+    echo          set MCP_ALLOWED_HOSTS=127.0.0.1:8000,localhost:8000,HOSTNAME
+    echo          python server.py
+    echo        The tunnel keeps running; only the server needs the allowlist.
+    echo.
     "%CF_EXE%" tunnel --url http://127.0.0.1:8000
 )
 

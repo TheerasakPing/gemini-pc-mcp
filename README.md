@@ -58,9 +58,16 @@ winget install --id Cloudflare.cloudflared
 
 `<secret>` = ข้อความในไฟล์ `.mcp_secret` ซึ่ง `start.bat` จะแสดงลิงก์เต็มพร้อมรหัสให้บนจออยู่แล้ว
 
+> ⚠️ **Host Allowlist (ป้องกัน DNS rebinding):** server ตรวจ `Host` header ของทุกคำขอ ค่าเริ่มต้นอนุญาตเฉพาะ `127.0.0.1:8000` และ `localhost:8000` คำขอที่มาผ่าน Tunnel จะได้รหัส `421` จนกว่าจะเพิ่ม hostname ของ tunnel ลงใน `MCP_ALLOWED_HOSTS` สำหรับ Quick Tunnel ให้รอให้ cloudflared แสดง hostname แล้วปิดหน้าต่าง server เดิม ตั้งค่าแล้วรันใหม่ (tunnel เดิมยังเปิดอยู่):
+> ```bat
+set MCP_ALLOWED_HOSTS=127.0.0.1:8000,localhost:8000,xxxx.trycloudflare.com
+python server.py
+```
+
 #### 👉 รันเองผ่าน Terminal
 ```bash
 pip install -r requirements.txt
+set MCP_ALLOWED_HOSTS=127.0.0.1:8000,localhost:8000,your-tunnel-host.example
 python server.py
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
@@ -92,7 +99,10 @@ python server.py
 
 - ถ้าไม่มีรหัสลับ server จะตอบ 404 ทุก request ถ้ารหัสหลุดเมื่อไหร่ ให้สร้าง `.mcp_secret` ใหม่แล้วรีสตาร์ท server
 - MCP **อ่านหรือแสดงไม่ได้**: `.mcp_secret`, `.tunnel_token`, `.git`, `.env` และทุกอย่างที่อยู่นอกโฟลเดอร์ทำงาน
-- MCP **เขียนไม่ได้**: ไฟล์ที่รันได้ (`.py .bat .cmd .ps1 .vbs .js .exe .dll .lnk .reg .scr .msi`) กันไม่ให้มีคนเขียน `server.py`/`start.bat` ใหม่เพื่อสั่งรันโค้ดบน PC
+- MCP **เขียนไม่ได้** ไฟล์ที่ Python/Windows โหลดหรือรันได้ทั้งชุด (`.py .pyw .pyc .pyo .pyd .pyz .pth .so .bat .cmd .com .exe .dll .scr .ps1 .vbs .js .wsf .hta .lnk .url .reg .msi` และอื่นๆ) กันเขียนทับ `server.py`/`start.bat` และกัน shadow โมดูล Python ในโฟลเดอร์แอป
+- ชื่อไฟล์ลับเทียบแบบไม่สนตัวพิมพ์ (`.GIT` ถือเป็น `.git`) และตรวจพาธที่ resolve แล้วอีกรอบ กัน alias ชื่อสั้น 8.3 บน Windows
+- ขีดจำกัดทั้งหมดตั้งผ่านตัวแปร: `MCP_MAX_FILE_BYTES` (25 MiB) สำหรับอ่าน/เขียน/Base64/ดาวน์โหลด, `MCP_MAX_LIST_ENTRIES` (5000) และ `MCP_MAX_LIST_DEPTH` (32) สำหรับ `list_files`, `MCP_COMMAND_TIMEOUT` (15 วินาที) และ output สูงสุด 256 KiB สำหรับ `run_allowed_command`
+- `git_status` ปิด fsmonitor hook ของ repo และ access log ของ uvicorn ปิดบังรหัสลับใน URL
 - ถ้า token ของ tunnel หลุด ให้ไปกด Refresh token ใน Cloudflare Zero Trust แล้วอัปเดตไฟล์ `.tunnel_token`
 
 ---
