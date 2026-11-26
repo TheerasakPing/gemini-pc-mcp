@@ -1,3 +1,6 @@
+import ctypes
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,14 +8,24 @@ from pathlib import Path
 from filesystem import (
     WorkspaceSecurityError,
     atomic_write,
+    list_workspace_files,
+    read_file_bytes,
     safe_workspace_path,
 )
+
+HIDDEN = {".env", ".mcp_secret", ".git"}
+
+
+def _short_path(path: str) -> str:
+    buffer = ctypes.create_unicode_buffer(1024)
+    ctypes.windll.kernel32.GetShortPathNameW(path, buffer, 1024)
+    return buffer.value
 
 
 class WorkspaceFilesystemTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -31,7 +44,60 @@ class WorkspaceFilesystemTests(unittest.TestCase):
 
     def test_rejects_hidden_path_component(self):
         with self.assertRaises(WorkspaceSecurityError):
-            safe_workspace_path(self.root, ".env/key", {".env"})
+            safe_workspace_path(self.root, ".env/key", HIDDEN)
+
+    def test_hidden_component_match_ignores_case(self):
+        for name in (".ENV/key", ".Git/HEAD", ".MCP_SECRET"):
+            with self.assertRaises(WorkspaceSecurityError, msg=name):
+                safe_workspace_path(self.root, name, HIDDEN)
+
+    def test_rejects_trailing_dot_or_space_component(self):
+        for name in ("newmod.py.", "dir /x.txt", "x.txt ", "dir./x.txt"):
+            with self.assertRaises(WorkspaceSecurityError, msg=name):
+                safe_workspace_path(self.root, name, HIDDEN)
+
+    def test_rejects_invalid_component_characters(self):
+        for name in ("a:b.txt", "a?.txt", "a<b.txt", "a\x00b"):
+            with self.assertRaises(WorkspaceSecurityError, msg=repr(name)):
+                safe_workspace_path(self.root, name, HIDDEN)
+
+    def test_rejects_windows_reserved_device_names(self):
+        for name in ("NUL", "con.txt", "COM1.dat", "lpt9"):
+            with self.assertRaises(WorkspaceSecurityError, msg=name):
+                safe_workspace_path(self.root, name, HIDDEN)
+        self.assertEqual(safe_workspace_path(self.root, "console.txt", HIDDEN),
+                         self.root / "console.txt")
+
+    @unittest.skipUnless(os.name == "nt", "Windows 8.3 short names")
+    def test_rejects_short_name_alias_of_hidden_file(self):
+        secret = self.root / ".mcp_secret"
+        secret.write_text("x")
+        short_root = _short_path(str(self.root))
+        alias = _short_path(str(secret))[len(short_root) + 1:]
+        if "~" not in alias:
+            self.skipTest("8.3 names disabled on this volume")
+        with self.assertRaises(WorkspaceSecurityError):
+            safe_workspace_path(self.root, alias, HIDDEN)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_rejects_junction_to_outside(self):
+        import _winapi
+        outside = self.root.parent / (self.root.name + "-junction-target")
+        outside.mkdir()
+        junction = self.root / "junction"
+        try:
+            (outside / "secret.txt").write_text("x")
+            _winapi.CreateJunction(str(outside), str(junction))
+            with self.assertRaises(WorkspaceSecurityError):
+                safe_workspace_path(self.root, "junction/secret.txt", HIDDEN)
+            with self.assertRaises(WorkspaceSecurityError):
+                atomic_write(junction / "new.txt", b"x", root=self.root)
+            self.assertFalse((outside / "new.txt").exists())
+            self.assertEqual(list_workspace_files(self.root, HIDDEN, max_entries=10, max_depth=2), [])
+        finally:
+            if junction.exists():
+                os.rmdir(junction)
+            shutil.rmtree(outside, ignore_errors=True)
 
     def test_rejects_symlink_to_outside(self):
         outside = self.root.parent / (self.root.name + "-outside")
@@ -67,6 +133,48 @@ class WorkspaceFilesystemTests(unittest.TestCase):
         with self.assertRaises(WorkspaceSecurityError):
             atomic_write(link, b"overwrite")
         self.assertEqual(outside.read_text(), "safe")
+
+    def test_atomic_write_rejects_parent_outside_root(self):
+        other_root = self.root / "other"
+        other_root.mkdir()
+        target = self.root / "a" / "f.txt"
+        with self.assertRaises(WorkspaceSecurityError):
+            atomic_write(target, b"x", root=other_root)
+        self.assertFalse(target.exists())
+
+    def test_read_file_bytes_roundtrip_and_limits(self):
+        target = self.root / "read.txt"
+        target.write_bytes(b"hello")
+        self.assertEqual(read_file_bytes(target, 5), b"hello")
+        with self.assertRaises(WorkspaceSecurityError):
+            read_file_bytes(target, 4)
+        with self.assertRaises(WorkspaceSecurityError):
+            read_file_bytes(self.root, 10)
+
+    def test_read_file_bytes_rejects_symlink(self):
+        outside = self.root / "outside.txt"
+        outside.write_text("safe")
+        link = self.root / "link.txt"
+        link.symlink_to(outside)
+        with self.assertRaises(WorkspaceSecurityError):
+            read_file_bytes(link, 10)
+
+    def test_list_workspace_files_caps_and_prunes(self):
+        for name in ("a.txt", "b.txt", "sub/c.txt", "sub/deep/d.txt", ".env", ".git/config"):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x")
+        outside = self.root.parent / (self.root.name + "-list-target")
+        outside.mkdir()
+        try:
+            (self.root / "link").symlink_to(outside, target_is_directory=True)
+            listed = list_workspace_files(self.root, HIDDEN, max_entries=10, max_depth=1)
+        finally:
+            link = self.root / "link"
+            os.rmdir(link) if os.name == "nt" else os.unlink(link)
+            shutil.rmtree(outside, ignore_errors=True)
+        self.assertEqual(sorted(p.replace("\\", "/") for p in listed), ["a.txt", "b.txt", "sub/c.txt"])
+        self.assertEqual(len(list_workspace_files(self.root, HIDDEN, max_entries=2, max_depth=8)), 2)
 
 
 if __name__ == "__main__":

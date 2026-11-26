@@ -1,11 +1,20 @@
 import os
 import base64
+import hmac
+import locale
+import logging
 from pathlib import Path
 import subprocess
+import threading
 
 # Network controls: URL downloads are deny-by-default and size-limited.
 from security import download_url
-from filesystem import atomic_write, safe_workspace_path
+from filesystem import (
+    atomic_write,
+    list_workspace_files,
+    read_file_bytes,
+    safe_workspace_path,
+)
 
 def build_transport_security_settings():
     """Build a fail-closed Host/Origin allowlist for the MCP HTTP transport."""
@@ -68,17 +77,16 @@ def safe_path(rel_path: str) -> Path:
     """ตรวจสอบ traversal, symlink และ reparse point ก่อนเข้าถึง Workspace"""
     return safe_workspace_path(WORKSPACE_DIR, rel_path, HIDDEN_NAMES)
 
-# ไฟล์ลับ/ไฟล์ระบบ: ห้ามอ่าน ห้ามเขียน ห้ามแสดงในรายการ
+# ไฟล์ลับ/ไฟล์ระบบ: ห้ามอ่าน ห้ามเขียน ห้ามแสดงในรายการ (เทียบชื่อแบบไม่สนตัวพิมพ์)
 HIDDEN_NAMES = {".tunnel_token", ".mcp_secret", ".git", ".env"}
-# ห้ามเขียนทับไฟล์ที่รันได้ (กันคนเขียน server.py/start.bat ใหม่แล้วได้สิทธิ์รันโค้ดบน PC)
-BLOCKED_WRITE_EXT = {".py", ".pyw", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".exe", ".dll", ".lnk", ".reg", ".scr", ".msi"}
-
-def is_hidden(path: Path) -> bool:
-    try:
-        rel = path.resolve().relative_to(WORKSPACE_DIR)
-    except ValueError:
-        return True
-    return any(part in HIDDEN_NAMES for part in rel.parts)
+# ห้ามเขียนทับไฟล์ที่ Python/Windows โหลดหรือรันได้ (โฟลเดอร์แอปคือ sys.path[0] ด้วย .pyc/.pyd shadow โมดูลได้)
+BLOCKED_WRITE_EXT = {
+    ".py", ".pyw", ".pyc", ".pyo", ".pyd", ".pyz", ".pyzw", ".pth", ".so",
+    ".bat", ".cmd", ".com", ".exe", ".dll", ".scr", ".pif", ".cpl", ".msi", ".msp", ".msc",
+    ".ps1", ".psm1", ".ps1xml", ".ps2", ".psc1",
+    ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsc", ".wsh", ".hta", ".sct",
+    ".lnk", ".scf", ".url", ".reg",
+}
 
 def writable_path(rel_path: str) -> Path:
     target = safe_path(rel_path)
@@ -86,7 +94,24 @@ def writable_path(rel_path: str) -> Path:
         raise ValueError(f"ไม่อนุญาตให้เขียนไฟล์ชนิด {target.suffix} ผ่าน MCP")
     return target
 
-MAX_FILE_BYTES = int(os.getenv("MCP_MAX_FILE_BYTES", str(25 * 1024 * 1024)))
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} ต้องเป็นจำนวนเต็มบวก") from exc
+    if value <= 0:
+        raise ValueError(f"{name} ต้องเป็นจำนวนเต็มบวก")
+    return value
+
+
+MAX_FILE_BYTES = _env_int("MCP_MAX_FILE_BYTES", 25 * 1024 * 1024)
+MAX_LIST_ENTRIES = _env_int("MCP_MAX_LIST_ENTRIES", 5000)
+MAX_LIST_DEPTH = _env_int("MCP_MAX_LIST_DEPTH", 32)
+COMMAND_TIMEOUT_SECONDS = _env_int("MCP_COMMAND_TIMEOUT", 15)
+COMMAND_OUTPUT_BYTES = 256 * 1024
 
 def _decode_base64_limited(encoded: str) -> bytes:
     compact = encoded.strip()
@@ -106,16 +131,20 @@ def _check_file_size(size: int) -> None:
 
 @mcp.tool()
 def list_files() -> list[str]:
-    """แสดงรายชื่อไฟล์ทั้งหมดในโฟลเดอร์ทำงานบน PC"""
-    return [str(p.relative_to(WORKSPACE_DIR)) for p in WORKSPACE_DIR.rglob("*") if p.is_file() and not p.is_symlink() and not is_hidden(p)]
+    """แสดงรายชื่อไฟล์ในโฟลเดอร์ทำงานบน PC (จำกัดจำนวน/ความลึก ไม่ตาม symlink)"""
+    return list_workspace_files(
+        WORKSPACE_DIR, HIDDEN_NAMES, max_entries=MAX_LIST_ENTRIES, max_depth=MAX_LIST_DEPTH
+    )
 
 @mcp.tool()
 def read_file(filename: str) -> str:
     """อ่านเนื้อหาไฟล์ข้อความในโฟลเดอร์ทำงาน"""
     path = safe_path(filename)
-    if path.stat().st_size > MAX_FILE_BYTES:
-        raise ValueError("ไฟล์มีขนาดเกินขีดจำกัดการอ่าน")
-    return path.read_text(encoding="utf-8")
+    data = read_file_bytes(path, MAX_FILE_BYTES)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("ไฟล์ไม่ใช่ข้อความ UTF-8") from exc
 
 @mcp.tool()
 def write_file(filename: str, content: str) -> str:
@@ -127,27 +156,27 @@ def write_file(filename: str, content: str) -> str:
     if content.startswith("[APPEND_BASE64]:"):
         b64_str = content[len("[APPEND_BASE64]:"):].strip()
         raw_bytes = _decode_base64_limited(b64_str)
-        total = atomic_write(path, raw_bytes, append=True, max_existing_bytes=MAX_FILE_BYTES)
+        total = atomic_write(path, raw_bytes, append=True, max_existing_bytes=MAX_FILE_BYTES, root=WORKSPACE_DIR)
         return f"เพิ่มข้อมูลไบนารีลงในไฟล์ {filename} เรียบร้อยแล้ว (+{len(raw_bytes)} bytes, รวม {total} bytes)"
 
     # 2. รองรับการบันทึกไฟล์ไบนารี/รูปภาพผ่าน Prefix [BASE64]:
     if content.startswith("[BASE64]:"):
         b64_str = content[len("[BASE64]:"):].strip()
         raw_bytes = _decode_base64_limited(b64_str)
-        atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES)
+        atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES, root=WORKSPACE_DIR)
         return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
     # 3. รองรับรูปแบบมาตรฐาน data:image/...;base64,...
     if content.startswith("data:") and ";base64," in content[:120]:
         b64_str = content.split(";base64,", 1)[1].strip()
         raw_bytes = _decode_base64_limited(b64_str)
-        atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES)
+        atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES, root=WORKSPACE_DIR)
         return f"บันทึกไฟล์รูปภาพ/ไบนารี {filename} เรียบร้อยแล้ว (ขนาด {len(raw_bytes)} bytes)"
 
     # 4. บันทึกไฟล์ข้อความปกติ (UTF-8)
     raw_bytes = content.encode("utf-8")
     _check_file_size(len(raw_bytes))
-    atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES)
+    atomic_write(path, raw_bytes, max_existing_bytes=MAX_FILE_BYTES, root=WORKSPACE_DIR)
     return f"บันทึกไฟล์ข้อความ {filename} เรียบร้อยแล้ว (ขนาด {len(content)} ตัวอักษร)"
 
 @mcp.tool()
@@ -158,7 +187,7 @@ def write_binary_file(filename: str, base64_data: str, append: bool = False) -> 
     if base64_data.startswith("data:") and ";base64," in base64_data[:120]:
         base64_data = base64_data.split(";base64,", 1)[1]
     raw_bytes = _decode_base64_limited(base64_data)
-    total = atomic_write(path, raw_bytes, append=append, max_existing_bytes=MAX_FILE_BYTES)
+    total = atomic_write(path, raw_bytes, append=append, max_existing_bytes=MAX_FILE_BYTES, root=WORKSPACE_DIR)
     return f"บันทึกไฟล์ไบนารี {filename} เรียบร้อยแล้ว (ขนาดรวม {total} bytes)"
 
 @mcp.tool()
@@ -167,29 +196,70 @@ def download_file_from_url(filename: str, url: str) -> str:
     path = writable_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = download_url(url, max_bytes=MAX_FILE_BYTES)
-    atomic_write(path, data, max_existing_bytes=MAX_FILE_BYTES)
+    atomic_write(path, data, max_existing_bytes=MAX_FILE_BYTES, root=WORKSPACE_DIR)
     return f"ดาวน์โหลดไฟล์ {filename} จาก URL เรียบร้อยแล้ว (ขนาด {len(data)} bytes)"
 
 # กำหนดเฉพาะคำสั่งที่อนุญาตให้รันแบบตายตัวเพื่อป้องกันการแทรกคำสั่งอันตราย
 ALLOWED_COMMANDS = {
-    "git_status": ["git", "status"],
+    # -c core.fsmonitor=false: ห้ามให้ hook ที่อยู่ใน repo รันตอนเรียก status
+    "git_status": ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "status"],
     "python_version": ["python", "--version"],
     "list_dir": ["cmd", "/c", "dir"],
 }
+
+
+def _run_bounded(argv: list[str], *, timeout: float = COMMAND_TIMEOUT_SECONDS,
+                 max_output: int = COMMAND_OUTPUT_BYTES) -> str:
+    """รัน argv ตายตัว (ไม่ผ่าน shell) จำกัดเวลาและ output; ลูกไม่ได้รับ MCP_SECRET"""
+    env = {key: value for key, value in os.environ.items() if key != "MCP_SECRET"}
+    process = subprocess.Popen(
+        argv, cwd=WORKSPACE_DIR, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    kept = bytearray()
+    truncated = False
+
+    def drain() -> None:
+        nonlocal truncated
+        while True:
+            try:
+                chunk = process.stdout.read1(65536)
+            except (OSError, ValueError):
+                return
+            if not chunk:
+                return
+            room = max_output - len(kept)
+            if len(chunk) > room:
+                truncated = True
+            if room > 0:
+                kept.extend(chunk[:room])
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        return "คำสั่งทำงานนานเกินกำหนด จึงถูกยกเลิก"
+    finally:
+        reader.join(timeout=5)
+        process.stdout.close()
+    text = bytes(kept).decode(locale.getpreferredencoding(False), errors="replace")
+    if truncated:
+        text += "\n[output truncated]"
+    return text
+
 
 @mcp.tool()
 def run_allowed_command(command_key: str) -> str:
     """รันคำสั่งใน PC จากรายการที่อนุญาต (git_status, python_version, list_dir)"""
     if command_key not in ALLOWED_COMMANDS:
         return f"ไม่อนุญาตคำสั่งนี้ คำสั่งที่ใช้ได้คือ: {', '.join(ALLOWED_COMMANDS.keys())}"
-    result = subprocess.run(
-        ALLOWED_COMMANDS[command_key],
-        cwd=WORKSPACE_DIR,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    return result.stdout or result.stderr
+    try:
+        return _run_bounded(ALLOWED_COMMANDS[command_key])
+    except OSError as exc:
+        return f"รันคำสั่งไม่สำเร็จ: {exc.__class__.__name__}"
 
 # ---------------------------------------------------------------------------
 # Auth: ทุก request ต้องมีรหัสลับ (ไฟล์ .mcp_secret ไม่ขึ้น git)
@@ -197,40 +267,66 @@ def run_allowed_command(command_key: str) -> str:
 #   แบบ 2: https://pc-mcp.108ido.com/mcp + header  Authorization: Bearer <secret>
 # ไม่มีรหัส/ผิด => 404 เหมือนไม่มีอะไรอยู่
 # ---------------------------------------------------------------------------
-import hmac
 SECRET_FILE = Path(__file__).resolve().parent / ".mcp_secret"
+
 def _load_secret() -> str:
     env = os.getenv("MCP_SECRET", "").strip()
     if env:
         return env
-    if not SECRET_FILE.exists() or not SECRET_FILE.read_text(encoding="ascii").strip():
+    if not SECRET_FILE.exists():
         import secrets
-        SECRET_FILE.write_text(secrets.token_urlsafe(24), encoding="ascii")  # สร้างครั้งแรกอัตโนมัติ
-    return SECRET_FILE.read_text(encoding="ascii").strip()
+        try:
+            descriptor = os.open(SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            descriptor = -1
+        if descriptor >= 0:
+            with os.fdopen(descriptor, "wb") as stream:  # สร้างครั้งแรกอัตโนมัติ, exclusive + fsync
+                stream.write(secrets.token_urlsafe(24).encode("ascii"))
+                stream.flush()
+                os.fsync(stream.fileno())
+    stored = SECRET_FILE.read_text(encoding="ascii").strip()
+    if not stored:
+        raise SystemExit(".mcp_secret ว่างเปล่า: ลบไฟล์แล้วรันใหม่เพื่อสร้างรหัสใหม่")
+    return stored
 
 MCP_SECRET = _load_secret()
+
+
+class _SecretRedactor(logging.Filter):
+    """Keep the secret-bearing URL out of the uvicorn access log line."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if MCP_SECRET and MCP_SECRET in message:
+            record.msg, record.args = message.replace(MCP_SECRET, "<redacted>"), None
+        return True
+
 
 def make_app():
     from starlette.responses import PlainTextResponse
     kwargs = {"streamable_http_path": "/mcp", "stateless_http": True}
     kwargs["transport_security"] = build_transport_security_settings()
     inner = mcp.streamable_http_app(**kwargs)
-    prefix = f"/{MCP_SECRET}"
+    url_prefix = f"/{MCP_SECRET}".encode()
+    bearer = b"Bearer " + url_prefix[1:]
     not_found = PlainTextResponse("Not Found", status_code=404)
+    logging.getLogger("uvicorn.access").addFilter(_SecretRedactor())
 
     async def app(scope, receive, send):
         if scope["type"] != "http":          # lifespan ฯลฯ ส่งต่อตรง
             return await inner(scope, receive, send)
-        path = scope.get("path", "")
-        ok = False
-        if MCP_SECRET and (path == prefix + "/mcp" or path.startswith(prefix + "/mcp/")):
-            scope = dict(scope, path=path[len(prefix):], raw_path=path[len(prefix):].encode())
-            ok = True
-        elif MCP_SECRET and (path == "/mcp" or path.startswith("/mcp/")):
-            auth = dict(scope.get("headers") or []).get(b"authorization", b"").decode()
-            ok = hmac.compare_digest(auth, f"Bearer {MCP_SECRET}")
-        if not ok:
+        path = scope.get("path", "").encode()
+        rest = None
+        if url_prefix and hmac.compare_digest(path[:len(url_prefix)], url_prefix):
+            rest = path[len(url_prefix):]
+        elif url_prefix and (path == b"/mcp" or path.startswith(b"/mcp/")):
+            auth = dict(scope.get("headers") or []).get(b"authorization", b"")
+            if not hmac.compare_digest(auth, bearer):
+                return await not_found(scope, receive, send)
+            return await inner(scope, receive, send)
+        if rest is None or not (rest == b"/mcp" or rest.startswith(b"/mcp/")):
             return await not_found(scope, receive, send)
+        scope = dict(scope, path=rest.decode(), raw_path=rest)
         return await inner(scope, receive, send)
     return app
 
