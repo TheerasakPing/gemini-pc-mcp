@@ -86,8 +86,9 @@ components, symbolic links, and Windows reparse points. Hidden names are
 compared case-insensitively and support globs:
 
 - Server secrets: `.mcp_secret`, `.mcp_secret.*`, `.tunnel_token`, `.tunnel_token.*`, `.git`.
-- Environment files: `.env*` (`.env.local`, `.env.production`, `.envrc`) and
-  `*.env*` (`prod.env`, `prod.env.bak`, `prod.env~`, `#prod.env#`).
+- Environment files: `.env*` (`.env.local`, `.env.production`, `.envrc`),
+  `*.env`, `*.env.*`, `*.env~*` and `#*.env#*` (`prod.env`, `prod.env.bak`,
+  `prod.env~`, `#prod.env#`). Names such as `prod.environment` stay readable.
 - Credential stores: `.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`, `.docker`,
   `.netrc`, `_netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.gitconfig`,
   `.vault-token`, `.pgpass`, `.htpasswd`.
@@ -132,19 +133,23 @@ Writes are refused in two cases.
    `*-lock.json`, `*-lock.yaml`, `yarn.lock`, `bun.lock`, `.yarnrc.yml`,
    `.npmrc`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `go.mod`, `go.sum`,
    `go.work`, `Gemfile*`, `composer.json`, `composer.lock`, `Podfile`,
-   `Podfile.lock`, `pubspec.lock`, `gradle.lockfile`, `packages.config`,
-   `nuget.config`), CI
+   `Podfile.lock`, `pubspec.yaml`, `pubspec.lock`, `gradle.lockfile`,
+   `gradle.properties`, `settings.gradle`, `settings.gradle.kts`,
+   `packages.config`, `packages.lock.json`, `nuget.config`), CI
    configuration (`.github`, `.gitlab`, `.gitlab-ci.yml`, `.circleci`,
    `.buildkite`, `.gitea`, `.forgejo`, `Jenkinsfile`, `.travis.yml`,
    `appveyor.yml`, `azure-pipelines.yml`, `.drone.yml`, `.woodpecker.yml`,
-   `.pre-commit-config.yaml`, `.husky`, `lefthook.yml`), build files
+   `.pre-commit-config.yaml`, `.husky`, `.huskyrc`, `.huskyrc.*`,
+   `*lefthook*.yml`, `*lefthook*.yaml`), build files
    (`Makefile`, `Dockerfile*`, `docker-compose*.yml`, `compose*.yaml`,
    `Containerfile`, `pom.xml`, `build.gradle*`, `CMakeLists.txt`,
    `configure`, `configure.ac`, `configure.in`, `meson.build`, `Rakefile`,
-   `Justfile`, `.justfile`, `Taskfile.yml`, `Taskfile.yaml`, `flake.nix`,
-   `shell.nix`, `default.nix`, `Directory.Build.props`),
+   `Justfile`, `.justfile`, `Taskfile*.yml`, `Taskfile*.yaml`, `flake.nix`,
+   `shell.nix`, `default.nix`, `Directory.Build.props`,
+   `Directory.Build.targets`, `Directory.Build.rsp`, `Directory.Packages.props`),
    editor and tool configuration that runs commands (`.vscode`, `.claude`,
-   `.cargo`, `*.code-workspace`, `*.config.ts`, `*.config.mts`),
+   `.cargo`, `*.code-workspace`, `*.config.ts`, `*.config.mts`,
+   `*.workspace.ts`),
    `.gitmodules`, `.envrc`, and shell or interpreter startup files (`.bashrc`,
    `.bash_profile`, `.profile`, `.zshrc`, `.zshenv`, `.Rprofile`, `.Renviron`,
    `.gdbinit`).
@@ -153,10 +158,14 @@ The name list is not exhaustive. It covers the files that common tooling
 executes automatically; review what the AI wrote before you commit, build,
 or install.
 
-The Bazel files `BUILD`, `WORKSPACE`, `MODULE.bazel` and `WORKSPACE.bazel`
-are blocked as the last path component only, so a directory called `build`
-or `workspace` stays writable. `.bazelversion` and files such as `BUILD.pkg`
-are not blocked; review Bazel files by hand.
+The Bazel files `BUILD`, `WORKSPACE`, `WORKSPACE.bazel`, `WORKSPACE.bzlmod`,
+`MODULE.bazel`, `MODULE.bazel.lock`, `.bazeliskrc` and `.bazelversion` are
+blocked as the last path component only, so a directory called `build` or
+`workspace` stays writable. `WORKSPACE.bzlmod` replaces `WORKSPACE` when
+bzlmod is enabled, and `.bazeliskrc` and `.bazelversion` tell Bazelisk which
+Bazel binary to download and run, so all three count as code. Files such as
+`BUILD.pkg` and `.bzl` modules are not blocked by name; a `.bzl` file runs
+only when a blocked file loads it. Review Bazel files by hand.
 
 Limits are positive integers read from the environment at startup:
 
@@ -202,9 +211,9 @@ Residual risks:
 workspace, a hard timeout (`MCP_COMMAND_TIMEOUT`), output capped at 256 KiB,
 and `MCP_SECRET` removed from the child environment. The executables are
 resolved to absolute paths at startup (`git` and `ls` from the absolute
-directories in `PATH` only, relative `PATH` entries are skipped, because
-`shutil.which` on Windows searches the startup directory first; the running
-interpreter for `python_version`, and
+directories in `PATH` only; relative `PATH` entries and an entry that equals
+the startup directory are skipped, because `shutil.which` on Windows searches
+the startup directory first; the running interpreter for `python_version`, and
 `%SystemRoot%\System32\cmd.exe` for `list_dir` on Windows), because
 Win32 `CreateProcess` searches the current directory before `PATH`; an
 executable placed inside a workspace is never picked up. On Linux and
