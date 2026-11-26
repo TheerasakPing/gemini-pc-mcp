@@ -238,15 +238,30 @@ def download_file_from_url(filename: str, url: str) -> str:
     return f"ดาวน์โหลดไฟล์ {filename} จาก URL เรียบร้อยแล้ว (ขนาด {len(data)} bytes)"
 
 # กำหนดเฉพาะคำสั่งที่อนุญาตให้รันแบบตายตัวเพื่อป้องกันการแทรกคำสั่งอันตราย
-# ใช้พาธเต็มของ executable: Win32 จะหาชื่อที่ตรงกันในโฟลเดอร์ปัจจุบันก่อน PATH ด้วย
-_GIT = shutil.which("git")
-_CMD = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"
-ALLOWED_COMMANDS = {
-    # -c core.fsmonitor=false: ห้ามให้ hook ที่อยู่ใน repo รันตอนเรียก status
-    "git_status": [_GIT or "git", "--no-optional-locks", "-c", "core.fsmonitor=false", "status"],
-    "python_version": [sys.executable or "python", "--version"],
-    "list_dir": [str(_CMD), "/c", "dir"],
-}
+# ใช้พาธเต็มของ executable เท่านั้น: Win32 จะหาชื่อที่ตรงกันในโฟลเดอร์ปัจจุบันก่อน PATH
+# และ POSIX ที่มี "." อยู่ใน PATH ก็เสี่ยงแบบเดียวกัน หาโปรแกรมไม่เจอให้เก็บ None ห้าม fallback เป็นชื่อเปล่า
+def resolve_executable(name: str) -> str | None:
+    """คืน absolute path ของโปรแกรม หรือ None ถ้าไม่มีใน PATH"""
+    found = shutil.which(name)
+    return str(Path(found).resolve()) if found else None
+
+def build_allowed_commands(platform: str = os.name) -> dict:
+    """ตารางคำสั่งที่อนุญาต ผูก executable ตอนสร้าง ไม่ใช่ตอนเรียกใช้"""
+    if platform == "nt":
+        list_dir = [
+            str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"),
+            "/c", "dir",
+        ]
+    else:
+        list_dir = [resolve_executable("ls"), "-la"]
+    return {
+        # -c core.fsmonitor=false: ห้ามให้ hook ที่อยู่ใน repo รันตอนเรียก status
+        "git_status": [resolve_executable("git"), "--no-optional-locks", "-c", "core.fsmonitor=false", "status"],
+        "python_version": [sys.executable, "--version"],
+        "list_dir": list_dir,
+    }
+
+ALLOWED_COMMANDS = build_allowed_commands()
 
 
 def _run_bounded(argv: list[str], *, timeout: float = COMMAND_TIMEOUT_SECONDS,
@@ -299,8 +314,11 @@ def run_allowed_command(command_key: str) -> str:
     """รันคำสั่งใน PC จากรายการที่อนุญาต (git_status, python_version, list_dir)"""
     if command_key not in ALLOWED_COMMANDS:
         return f"ไม่อนุญาตคำสั่งนี้ คำสั่งที่ใช้ได้คือ: {', '.join(ALLOWED_COMMANDS.keys())}"
+    argv = ALLOWED_COMMANDS[command_key]
+    if not argv[0]:
+        return "ไม่พบโปรแกรมที่คำสั่งนี้ต้องใช้บนเครื่องนี้ ให้ติดตั้งแล้วรีสตาร์ท server"
     try:
-        return _run_bounded(ALLOWED_COMMANDS[command_key])
+        return _run_bounded(argv)
     except OSError as exc:
         return f"รันคำสั่งไม่สำเร็จ: {exc.__class__.__name__}"
 

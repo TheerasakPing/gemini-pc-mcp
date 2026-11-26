@@ -261,9 +261,32 @@ class WorkspaceTests(unittest.TestCase):
 class CommandTests(unittest.TestCase):
     def test_allowed_commands_use_absolute_executables(self):
         self.assertEqual(Path(server.ALLOWED_COMMANDS["python_version"][0]), Path(sys.executable))
-        self.assertTrue(Path(server.ALLOWED_COMMANDS["list_dir"][0]).is_absolute())
-        if shutil.which("git"):
-            self.assertTrue(Path(server.ALLOWED_COMMANDS["git_status"][0]).is_absolute())
+        for key, argv in server.ALLOWED_COMMANDS.items():
+            if argv[0]:
+                self.assertTrue(Path(argv[0]).is_absolute(), f"{key} ใช้ชื่อเปล่า: {argv[0]!r}")
+
+    @unittest.skipUnless(os.name != "nt", "POSIX ls")
+    def test_posix_list_dir_uses_absolute_ls(self):
+        argv = server.build_allowed_commands("posix")["list_dir"]
+        self.assertTrue(Path(argv[0]).is_absolute())
+        self.assertEqual(Path(argv[0]).name, "ls")
+        self.assertNotIn("/c", argv)
+
+    def test_windows_list_dir_uses_cmd_exe(self):
+        argv = server.build_allowed_commands("nt")["list_dir"]
+        self.assertTrue(argv[0].lower().endswith("cmd.exe"), argv)
+        self.assertEqual(argv[1:3], ["/c", "dir"])
+
+    def test_missing_executable_has_no_bare_name_fallback(self):
+        with patch.object(server.shutil, "which", return_value=None):
+            commands = server.build_allowed_commands("posix")
+        self.assertFalse(commands["git_status"][0])
+        self.assertFalse(commands["list_dir"][0])
+
+    def test_missing_executable_reports_instead_of_spawning(self):
+        with patch.dict(server.ALLOWED_COMMANDS, {"git_status": [None, "status"]}):
+            result = server.run_allowed_command("git_status")
+        self.assertIn("ไม่พบโปรแกรม", result)
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("whoami"), "Windows whoami.exe")
     def test_workspace_executable_is_not_picked_up(self):
