@@ -175,7 +175,7 @@ def make_app():
     kwargs = {"streamable_http_path": "/mcp", "stateless_http": True}
     try:
         from mcp.server.transport_security import TransportSecuritySettings
-        kwargs["transport_security"] = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        kwargs["transport_security"] = TransportSecuritySettings(enable_dns_rebinding_protection=True)
     except Exception:
         pass
     inner = mcp.streamable_http_app(**kwargs)
