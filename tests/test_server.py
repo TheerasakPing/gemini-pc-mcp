@@ -38,6 +38,13 @@ class _AccessLogCapture(logging.Handler):
         self.lines.append(record.getMessage())
 
 
+def _sample_paths(patterns):
+    """ชื่อตัวอย่างสำหรับทดสอบ: แทน * ด้วย sample และใช้เป็นโฟลเดอร์ถ้าไม่มีนามสกุล"""
+    for pattern in sorted(patterns):
+        sample = pattern.replace("*", "sample")
+        yield pattern, sample if Path(sample).suffix else f"{sample}/x.txt"
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -218,14 +225,43 @@ class ToolPolicyTests(unittest.TestCase):
                    ".github/workflows/x.yml", ".gitlab-ci.yml", "Jenkinsfile", "Makefile",
                    "Dockerfile.prod", ".gitmodules", ".bashrc", ".zshenv", ".envrc",
                    ".vscode/tasks.json", ".cargo/config.toml", ".claude/settings.json",
-                   "x.code-workspace", "pom.xml", "compose.yaml", "flake.nix", "vite.config.ts")
+                   "x.code-workspace", "pom.xml", "compose.yaml", "compose.override.yaml",
+                   "flake.nix", "vitest.config.ts", ".justfile", "Taskfile.yaml",
+                   "configure.in", "Podfile.lock", "go.work", "pubspec.lock",
+                   "gradle.lockfile", "nuget.config", "packages.config",
+                   "Directory.Build.props", ".husky/pre-commit", "lefthook.yml",
+                   "MODULE.bazel", "WORKSPACE.bazel")
         for name in blocked:
             with self.assertRaises(ValueError, msg=name):
                 server.write_file(name, "x")
         for name in ("README.md", "notes.txt", "app.ts", "src/main.rs", "config.yaml"):
             server.write_file(name, "x")
             self.assertEqual(server.read_file(name), "x")
+        for name in ("build/out.txt", "workspace/notes.txt", "BUILD.notes.md"):
+            server.write_file(name, "x")
+            self.assertEqual(server.read_file(name), "x")
         self.assertFalse((self.workspace / ".github").exists())
+
+    def test_every_blocked_name_pattern_is_enforced(self):
+        for pattern, relative in _sample_paths(server.BLOCKED_WRITE_NAMES):
+            with self.assertRaises(ValueError, msg=pattern):
+                server.write_file(relative, "x")
+        for name in ("BUILD", "sub/WORKSPACE", "MODULE.bazel", "WORKSPACE.bazel"):
+            with self.assertRaises(ValueError, msg=name):
+                server.write_file(name, "x")
+        # Directory spelled like the Bazel file stays usable.
+        server.write_file("build/out.txt", "x")
+        server.write_file("workspace/notes.txt", "x")
+
+    def test_every_hidden_name_pattern_is_enforced(self):
+        for pattern, relative in _sample_paths(server.HIDDEN_NAMES):
+            with self.assertRaises(ValueError, msg=pattern):
+                server.read_file(relative)
+            with self.assertRaises(ValueError, msg=pattern):
+                server.write_file(relative, "x")
+        for name in ("prod.env~", "#prod.env#", "prod.env~1", "id_xmss", "private-key.asc"):
+            with self.assertRaises(ValueError, msg=name):
+                server.read_file(name)
 
     def test_executable_and_loadable_extensions_are_blocked(self):
         blocked = ("hmac.pyc", "evil.pyd", "x.pth", "x.so", "server.py", "x.bat", "x.hta",
@@ -286,10 +322,23 @@ class WorkspaceTests(unittest.TestCase):
             server.resolve_workspace("\\\\?\\" + str(Path.home()))
 
     def test_relative_path_is_based_on_the_app_folder(self):
-        self.assertEqual(
-            server.resolve_workspace("ws-relative"),
-            (server.DEFAULT_WORKSPACE.parent / "ws-relative").resolve(),
-        )
+        elsewhere = tempfile.mkdtemp(prefix="gpm-cwd-")
+        previous = os.getcwd()
+        try:
+            os.chdir(elsewhere)
+            self.assertEqual(
+                server.resolve_workspace("ws-relative"),
+                (server.DEFAULT_WORKSPACE.parent / "ws-relative").resolve(),
+            )
+        finally:
+            os.chdir(previous)
+            shutil.rmtree(elsewhere, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows drive-relative paths")
+    def test_drive_relative_path_is_refused(self):
+        for raw in ("D:sub", "D:", "\\\\?\\D:sub"):
+            with self.assertRaises(ValueError, msg=raw):
+                server.resolve_workspace(raw)
 
 
 class CommandTests(unittest.TestCase):
@@ -298,6 +347,21 @@ class CommandTests(unittest.TestCase):
         for key, argv in server.ALLOWED_COMMANDS.items():
             if argv[0]:
                 self.assertTrue(Path(argv[0]).is_absolute(), f"{key} ใช้ชื่อเปล่า: {argv[0]!r}")
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("whoami"), "Windows whoami.exe")
+    def test_executable_is_not_resolved_from_the_startup_directory(self):
+        real = server.resolve_executable("whoami")
+        self.assertTrue(real and Path(real).is_absolute())
+        holder = Path(tempfile.mkdtemp(prefix="gpm-cwd-"))
+        previous = os.getcwd()
+        try:
+            shutil.copy(shutil.which("whoami"), holder / "whoami.bat")
+            os.chdir(holder)
+            found = server.resolve_executable("whoami")
+        finally:
+            os.chdir(previous)
+            shutil.rmtree(holder, ignore_errors=True)
+        self.assertEqual(found, real)
 
     @unittest.skipUnless(os.name != "nt", "POSIX ls")
     def test_posix_list_dir_uses_absolute_ls(self):

@@ -85,6 +85,11 @@ def resolve_workspace(raw: str | Path | None) -> Path:
         if text[:4].upper() == "UNC\\":
             text = "\\\\" + text[4:]
     workspace = Path(text or str(DEFAULT_WORKSPACE))
+    # D:sub หรือ D: ไม่ใช่ absolute path: Windows จะต่อกับ cwd ปัจจุบัน (หรือไดรฟ์ที่ shell จำไว้) ซึ่งเปลี่ยนได้ทุกครั้งที่สั่งรัน
+    if workspace.drive and not workspace.root:
+        raise ValueError(
+            "MCP_WORKSPACE ห้ามเป็น path แบบ D:folder ให้ใช้ absolute path หรือ path สัมพัทธ์ที่ไม่มีชื่อไดรฟ์"
+        )
     if not workspace.is_absolute():
         workspace = DEFAULT_WORKSPACE.parent / workspace
     workspace = workspace.resolve()
@@ -105,12 +110,12 @@ def safe_path(rel_path: str) -> Path:
 # เทียบชื่อแบบไม่สนตัวพิมพ์ และรองรับ glob เพราะ .env.local หรือ prod.env ก็เป็นไฟล์ลับเหมือน .env
 HIDDEN_NAMES = {
     ".tunnel_token", ".tunnel_token.*", ".mcp_secret", ".mcp_secret.*", ".git",
-    ".env*", "*.env",
+    ".env*", "*.env*",
     ".ssh", ".aws", ".gnupg", ".kube", ".docker",
     ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".gitconfig",
     "id_rsa*", "id_ed25519*", "id_ecdsa*", "*.pem", "*.key", "*.p12", "*.pfx",
-    "id_dsa*", "id_dss*", "_netrc", ".azure", ".vault-token", ".pgpass", ".htpasswd",
-    "*.env.*", "*.jks", "*.keystore", "*.ppk", "*.kdbx",
+    "id_dsa*", "id_dss*", "id_xmss*", "private-key*", "_netrc", ".azure", ".vault-token",
+    ".pgpass", ".htpasswd", "*.jks", "*.keystore", "*.ppk", "*.kdbx",
     ".mcp-tmp-*",
 }
 # ห้ามเขียนทับไฟล์ที่ Python/Windows/shell โหลดหรือรันได้ (.pyc/.pyd shadow โมดูลได้, .sh/.cjs รันโดย interpreter)
@@ -136,21 +141,27 @@ BLOCKED_WRITE_NAMES = {
     ".envrc",
     ".vscode", ".claude", ".cargo", "*.code-workspace",
     "pom.xml", "build.gradle", "build.gradle.kts", "build.sbt", "cmakelists.txt", "configure",
-    "configure.ac", "meson.build", "rakefile", "sconstruct", "build.bazel", "justfile",
-    "taskfile.yml", "flake.nix", "shell.nix", "default.nix", ".bazelrc",
+    "configure.ac", "configure.in", "meson.build", "rakefile", "sconstruct", "build.bazel", "justfile",
+    ".justfile", "taskfile.yml", "taskfile.yaml", "flake.nix", "shell.nix", "default.nix", ".bazelrc",
     "bitbucket-pipelines.yml", ".woodpecker.yml", "cloudbuild.yaml", ".gitea", ".forgejo",
     "bun.lock", "bun.lockb", "npm-shrinkwrap.json", "composer.json", "composer.lock",
-    "pnpm-workspace.yaml", "bunfig.toml", "uv.toml", "podfile", "*.gemspec",
-    "compose.yaml", "compose.yml", "containerfile",
-    ".rprofile", ".renviron", ".gdbinit", "vite.config.*", "next.config.*",
+    "pnpm-workspace.yaml", "bunfig.toml", "uv.toml", "podfile", "podfile.lock", "*.gemspec",
+    "compose*.yaml", "compose*.yml", "containerfile", "go.work", "pubspec.lock", "gradle.lockfile",
+    "nuget.config", "packages.config", "directory.build.props", ".husky", "lefthook.yml",
+    ".rprofile", ".renviron", ".gdbinit", "*.config.ts", "*.config.mts",
     ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv",
     ".zlogin", ".zlogout", ".zprofile", ".kshrc", ".cshrc", ".tcshrc", ".login", ".logout",
 }
+
+# ไฟล์รากของ Bazel ตรวจเฉพาะ component สุดท้าย เพราะ build/ กับ workspace/ เป็นชื่อโฟลเดอร์ปกติ
+BLOCKED_WRITE_FILE_NAMES = {"build", "workspace", "module.bazel", "workspace.bazel"}
 
 def writable_path(rel_path: str) -> Path:
     target = safe_path(rel_path)
     if target.suffix.lower() in BLOCKED_WRITE_EXT:
         raise ValueError(f"ไม่อนุญาตให้เขียนไฟล์ชนิด {target.suffix} ผ่าน MCP")
+    if target.name.casefold() in BLOCKED_WRITE_FILE_NAMES:
+        raise ValueError("ไม่อนุญาตให้เขียนไฟล์ BUILD/WORKSPACE ของ Bazel ผ่าน MCP")
     if any(matches_any(part.casefold(), BLOCKED_WRITE_NAMES)
            for part in target.relative_to(WORKSPACE_DIR).parts):
         raise ValueError("ไม่อนุญาตให้แก้ไฟล์ dependency/CI/build/shell config ผ่าน MCP ผู้ใช้ต้องแก้เอง")
@@ -262,9 +273,15 @@ def download_file_from_url(filename: str, url: str) -> str:
 # ใช้พาธเต็มของ executable เท่านั้น: Win32 จะหาชื่อที่ตรงกันในโฟลเดอร์ปัจจุบันก่อน PATH
 # และ POSIX ที่มี "." อยู่ใน PATH ก็เสี่ยงแบบเดียวกัน หาโปรแกรมไม่เจอให้เก็บ None ห้าม fallback เป็นชื่อเปล่า
 def resolve_executable(name: str) -> str | None:
-    """คืน absolute path ของโปรแกรม หรือ None ถ้าไม่มีใน PATH"""
-    found = shutil.which(name)
-    return str(Path(found).resolve()) if found else None
+    """คืน absolute path ของโปรแกรมจาก PATH หรือ None ถ้าไม่มี ไม่ค้นโฟลเดอร์ปัจจุบัน"""
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        # shutil.which บน Windows แทรกโฟลเดอร์ปัจจุบันไว้หน้า PATH เว้นแต่ "." อยู่ในรายการแล้ว
+        # จึงใส่ "." ต่อท้ายทุกครั้ง แล้วรับเฉพาะผลที่เป็น absolute path (มาจาก directory ไม่ใช่ ".")
+        if directory and Path(directory).is_absolute():
+            found = shutil.which(name, path=directory + os.pathsep + os.curdir)
+            if found and Path(found).is_absolute():
+                return str(Path(found).resolve())
+    return None
 
 def build_allowed_commands(platform: str = os.name) -> dict:
     """ตารางคำสั่งที่อนุญาต ผูก executable ตอนสร้าง ไม่ใช่ตอนเรียกใช้"""
