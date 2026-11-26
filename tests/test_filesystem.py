@@ -13,7 +13,11 @@ from filesystem import (
     safe_workspace_path,
 )
 
-HIDDEN = {".env", ".mcp_secret", ".git"}
+HIDDEN = {
+    ".env", ".env.*", ".mcp_secret", ".mcp_secret.*", ".git", ".tunnel_token", ".tunnel_token.*",
+    "*.env",
+    ".ssh", "*.pem",
+}
 
 
 def _short_path(path: str) -> str:
@@ -51,6 +55,15 @@ class WorkspaceFilesystemTests(unittest.TestCase):
             with self.assertRaises(WorkspaceSecurityError, msg=name):
                 safe_workspace_path(self.root, name, HIDDEN)
 
+    def test_hidden_patterns_cover_variants(self):
+        hidden = (".ENV.local", "prod.env", ".env.bak", ".mcp_secret.old", ".tunnel_token.bak",
+                  ".ssh/id_ed25519", "cert.pem", "CERT.PEM")
+        for name in hidden:
+            with self.assertRaises(WorkspaceSecurityError, msg=name):
+                safe_workspace_path(self.root, name, HIDDEN)
+        for name in ("environment.md", "env.txt", "pem.notes.txt"):
+            safe_workspace_path(self.root, name, HIDDEN)
+
     def test_rejects_trailing_dot_or_space_component(self):
         for name in ("newmod.py.", "dir /x.txt", "x.txt ", "dir./x.txt"):
             with self.assertRaises(WorkspaceSecurityError, msg=name):
@@ -62,11 +75,14 @@ class WorkspaceFilesystemTests(unittest.TestCase):
                 safe_workspace_path(self.root, name, HIDDEN)
 
     def test_rejects_windows_reserved_device_names(self):
-        for name in ("NUL", "con.txt", "COM1.dat", "lpt9"):
+        for name in ("NUL", "con.txt", "COM1.dat", "lpt9", "COM¹", "LPT².txt", "CONOUT$",
+                     "CONIN$", "CLOCK$", "NUL .txt"):
             with self.assertRaises(WorkspaceSecurityError, msg=name):
                 safe_workspace_path(self.root, name, HIDDEN)
         self.assertEqual(safe_workspace_path(self.root, "console.txt", HIDDEN),
                          self.root / "console.txt")
+        self.assertEqual(safe_workspace_path(self.root, "com10.txt", HIDDEN),
+                         self.root / "com10.txt")
 
     @unittest.skipUnless(os.name == "nt", "Windows 8.3 short names")
     def test_rejects_short_name_alias_of_hidden_file(self):
@@ -142,6 +158,19 @@ class WorkspaceFilesystemTests(unittest.TestCase):
             atomic_write(target, b"x", root=other_root)
         self.assertFalse(target.exists())
 
+    def test_atomic_write_creates_no_directory_through_link(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        inside = self.root / "inside"
+        inside.mkdir()
+        (inside / "link").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(WorkspaceSecurityError):
+            atomic_write(inside / "link" / "sub" / "f.txt", b"x", root=inside)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(
+            atomic_write(inside / "new" / "f.txt", b"x", root=inside), 1
+        )
+
     def test_read_file_bytes_roundtrip_and_limits(self):
         target = self.root / "read.txt"
         target.write_bytes(b"hello")
@@ -160,7 +189,8 @@ class WorkspaceFilesystemTests(unittest.TestCase):
             read_file_bytes(link, 10)
 
     def test_list_workspace_files_caps_and_prunes(self):
-        for name in ("a.txt", "b.txt", "sub/c.txt", "sub/deep/d.txt", ".env", ".git/config"):
+        for name in ("a.txt", "b.txt", "sub/c.txt", "sub/deep/d.txt", ".env", ".git/config",
+                     ".env.local", "prod.env", ".ssh/id_ed25519", "cert.pem"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("x")

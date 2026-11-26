@@ -1,6 +1,7 @@
 """Workspace filesystem guards and atomic file transactions."""
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import stat
@@ -11,9 +12,13 @@ from pathlib import Path
 _LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _INVALID_COMPONENT = re.compile(r'[<>:"|?*\x00-\x1f]')
-_RESERVED_NAMES = {"con", "prn", "aux", "nul"} | {f"com{digit}" for digit in range(1, 10)} | {
-    f"lpt{digit}" for digit in range(1, 10)
-}
+_RESERVED_NAMES = (
+    {"con", "prn", "aux", "nul", "conin$", "conout$", "clock$"}
+    | {f"com{digit}" for digit in "123456789"}
+    | {f"lpt{digit}" for digit in "123456789"}
+)
+# Win32 also treats COM¹/COM²/COM³ and LPT¹/LPT²/LPT³ as device names.
+_SUPERSCRIPT_DIGITS = str.maketrans("¹²³", "123")
 _REPARSE_POINT = 0x400
 
 
@@ -43,14 +48,20 @@ def _reject_link_or_reparse(path: Path, message: str) -> None:
         raise WorkspaceSecurityError(message)
 
 
+def matches_any(name: str, patterns: set[str]) -> bool:
+    """Glob match; callers pass casefolded names so matching ignores case."""
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
 def _validate_component(part: str, hidden: set[str]) -> None:
     folded = part.casefold()
-    if folded in hidden:
+    if matches_any(folded, hidden):
         raise WorkspaceSecurityError("ไฟล์นี้เป็นไฟล์ลับของระบบ เข้าถึงไม่ได้")
     # Win32 silently strips trailing dots/spaces and rewrites the remaining name.
     if part != part.rstrip(" .") or _INVALID_COMPONENT.search(part):
         raise WorkspaceSecurityError("ชื่อไฟล์มีอักขระหรือรูปแบบที่ไม่อนุญาต")
-    if folded.split(".")[0] in _RESERVED_NAMES:
+    stem = folded.split(".")[0].strip().translate(_SUPERSCRIPT_DIGITS)
+    if stem in _RESERVED_NAMES:
         raise WorkspaceSecurityError("ชื่อไฟล์เป็นชื่ออุปกรณ์ที่ Windows สงวนไว้")
 
 
@@ -134,7 +145,7 @@ def list_workspace_files(workspace: Path, hidden_names: set[str], *,
         try:
             with os.scandir(directory) as entries:
                 for entry in entries:
-                    if entry.name.casefold() in hidden:
+                    if matches_any(entry.name.casefold(), hidden):
                         continue
                     try:
                         info = entry.stat(follow_symlinks=False)
@@ -159,9 +170,11 @@ def atomic_write(path: Path, data: bytes, *, append: bool = False,
                  root: Path | None = None) -> int:
     """Atomically replace a file; append is implemented as locked read+replace.
 
-    root: re-check the real parent directory against this root before creating
-    the temporary file and again before the replace (narrows the directory-swap race).
+    root: check the real parent directory against this root before creating
+    directories, inside the lock, and again before the replace (narrows the
+    directory-swap race).
     """
+    _assert_in_root(path.parent, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = _lock_for(path)
     with lock:
