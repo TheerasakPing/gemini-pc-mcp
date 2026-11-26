@@ -14,8 +14,10 @@ set MCP_DOWNLOAD_ALLOWED_HOSTS=images.example.com,files.example.com
 start.bat
 ```
 
-The download client rejects non-public DNS answers, embedded URL credentials,
-non-standard ports, and redirects. The response is capped at 25 MiB by default.
+The download client rejects non-public DNS answers (including the IPv6
+translation prefixes `64:ff9b::/96` and `2002::/16`, which can carry a
+private IPv4 address), embedded URL credentials, non-standard ports, and
+redirects. The response is capped at 25 MiB by default.
 Operators can adjust the cap with `MCP_MAX_DOWNLOAD_BYTES` and the network
 timeout with `MCP_DOWNLOAD_TIMEOUT` (seconds).
 
@@ -65,29 +67,68 @@ immediately if it may have been exposed.
 
 ## Workspace filesystem protections
 
+The default workspace is the `workspace/` subdirectory next to `server.py`,
+not the application directory. The application directory is `sys.path[0]` and
+holds the dependency and CI configuration of the server itself, so MCP never
+writes there by default. Set `MCP_WORKSPACE` to point the tools at another
+folder. The server refuses to start when that folder is a filesystem root or
+the user's home directory; use a dedicated folder for AI output.
+
 Workspace paths reject absolute paths, parent traversal, hidden system
-components (`.git`, `.env`, `.mcp_secret`, `.tunnel_token`), symbolic links,
-and Windows reparse points. Hidden names are compared case-insensitively, so
-`.GIT` and `.Env` are rejected as well. Path components with trailing dots or
-spaces, Windows-invalid characters, and reserved device names (`NUL`, `CON`,
-`COM1`, ...) are rejected. After resolution the final path is validated again,
-which covers Windows 8.3 short-name aliases such as `MCP_SE~1`.
+components, symbolic links, and Windows reparse points. Hidden names are
+compared case-insensitively and support globs:
+
+- Server secrets: `.mcp_secret`, `.mcp_secret.*`, `.tunnel_token`, `.tunnel_token.*`, `.git`.
+- Environment files: `.env*` (`.env.local`, `.env.production`, `.envrc`) and `*.env` (`prod.env`).
+- Credential stores: `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`,
+  `.git-credentials`, `.npmrc`, `.pypirc`, `.gitconfig`.
+- Key material: `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`.
+
+Hidden names cannot be read, written, or listed. Other secrets inside the
+workspace (for example `credentials.json` or `terraform.tfstate`) are still
+readable: the workspace is not a secret boundary, so keep real secrets out
+of it.
+
+Path components with trailing dots or spaces, Windows-invalid characters,
+and reserved device names (`NUL`, `CON`, `COM1`, `COM¹`, `CONOUT$`, ...) are
+rejected. After resolution the final path is validated again, which covers
+Windows 8.3 short-name aliases such as `MCP_SE~1`.
 
 Reads open the file first and then verify type, identity, and size on the open
 descriptor, so a file swapped or grown between validation and read is rejected
 or truncated to the limit. File writes use a same-directory temporary file
-followed by an atomic replace, and the real parent directory is re-checked
-against the workspace root before the temporary file is created and again
-before the replace. Append is implemented as a locked read-and-replace
+followed by an atomic replace. The real parent directory is checked against
+the workspace root before any directory is created, inside the lock, and
+again before the replace. Append is implemented as a locked read-and-replace
 operation. `list_files` does not follow links and stops at a configurable
 entry count and directory depth.
 
-Writes are refused for extensions that Python or Windows load or execute:
-`.py .pyw .pyc .pyo .pyd .pyz .pyzw .pth .so .bat .cmd .com .exe .dll .scr
-.pif .cpl .msi .msp .msc .ps1 .psm1 .ps1xml .ps2 .psc1 .vbs .vbe .js .jse
-.wsf .wsc .wsh .hta .sct .lnk .scf .url .reg`. The default workspace is the
-application directory, which is also `sys.path[0]`; a written `.pyc` or `.pyd`
-would shadow a standard-library import at the next start.
+Writes are refused in two cases.
+
+1. By extension, for files that an interpreter or the operating system loads
+   or runs: `.py .pyw .pyc .pyo .pyd .pyz .pyzw .pth .so .dylib .ocx .bat
+   .cmd .com .exe .dll .scr .pif .cpl .msi .msp .msc .msix .appx .ps1 .psm1
+   .ps1xml .ps2 .psc1 .vbs .vbe .js .jse .wsf .wsc .wsh .hta .sct .sh .bash
+   .zsh .fish .ksh .cjs .mjs .rb .pl .pm .php .lua .tcl .jar .command .tool
+   .scpt .applescript .terminal .inetloc .desktop .service .lnk .scf .url
+   .reg`. A `.pyc` or `.pyd` next to a script shadows standard-library
+   imports, and a `.sh` or `.cjs` runs the moment a shell or Node is pointed
+   at it.
+2. By name, for files that tooling runs or loads without the user opening
+   them: dependency manifests (`requirements*.txt`, `pyproject.toml`,
+   `setup.cfg`, `Pipfile*`, `poetry.lock`, `uv.lock`, `package.json`,
+   `*-lock.json`, `*-lock.yaml`, `yarn.lock`, `.yarnrc.yml`, `.npmrc`,
+   `Cargo.toml`, `Cargo.lock`, `build.rs`, `go.mod`, `go.sum`, `Gemfile*`),
+   CI configuration (`.github`, `.gitlab`, `.gitlab-ci.yml`, `.circleci`,
+   `.buildkite`, `Jenkinsfile`, `.travis.yml`, `appveyor.yml`,
+   `azure-pipelines.yml`, `.drone.yml`, `.pre-commit-config.yaml`), build
+   files (`Makefile`, `Dockerfile*`, `docker-compose*.yml`), `.gitmodules`,
+   `.envrc`, and shell startup files (`.bashrc`, `.bash_profile`, `.profile`,
+   `.zshrc`, `.zshenv`, ...).
+
+The name list is not exhaustive. It covers the files that common tooling
+executes automatically; review what the AI wrote before you commit, build,
+or install.
 
 Limits are positive integers read from the environment at startup:
 
@@ -101,32 +142,54 @@ single Base64 `write_file` payload above roughly 3 MiB is rejected by the
 transport before the tool runs. Use `[APPEND_BASE64]:` chunks for larger
 files; the tool-level cap is `MCP_MAX_FILE_BYTES`.
 
-Residual risk: the append lock is process-local: it prevents concurrent
-writes handled by threads in this server process, but is not a cross-process
-lock. The final parent-directory check and `os.replace` are still separate
-operations, so a local actor with write access to the workspace parent could
-race directory replacement (TOCTOU). Run the server under a dedicated OS
-account and ensure untrusted users cannot modify the workspace root or its
-parent. A follow-up platform-specific openat/handle-relative implementation
-is required for strong cross-process and hostile-local-user race resistance.
+Residual risks:
+
+- The append lock is process-local: it prevents concurrent writes handled by
+  threads in this server process, but is not a cross-process lock.
+- The final parent-directory check and `os.replace` are still separate
+  operations, so a local actor with write access to the workspace parent
+  could race directory replacement (TOCTOU). Run the server under a
+  dedicated OS account and ensure untrusted users cannot modify the
+  workspace root or its parent. A follow-up platform-specific
+  openat/handle-relative implementation is required for strong
+  cross-process and hostile-local-user race resistance.
+- There is no workspace quota. Each write is capped by `MCP_MAX_FILE_BYTES`,
+  but repeated writes can fill the disk that holds the workspace.
+- On FAT volumes `st_ino` is 0, which disables the identity check on the
+  open descriptor; the type and size checks still apply.
+- On Windows the `0o600` mode of a new `.mcp_secret` has no effect; the file
+  inherits the ACL of the application directory. On a multi-user machine run
+  `icacls .mcp_secret /inheritance:r /grant:r "%USERNAME%:F"` once.
 
 ## Command execution
 
 `run_allowed_command` runs a fixed argv list (no shell) with `cwd` set to the
 workspace, a hard timeout (`MCP_COMMAND_TIMEOUT`), output capped at 256 KiB,
-and `MCP_SECRET` removed from the child environment. `git_status` runs with
+and `MCP_SECRET` removed from the child environment. The executables are
+resolved to absolute paths at startup (`git` through `PATH`, the running
+interpreter for `python_version`, `%SystemRoot%\System32\cmd.exe`), because
+Win32 `CreateProcess` searches the current directory before `PATH`; an
+executable placed inside a workspace is never picked up. A process that the
+command leaves behind keeps the output pipe open, and the server then
+returns after 5 seconds instead of waiting for it. `git_status` runs with
 `--no-optional-locks -c core.fsmonitor=false` so a repository-controlled
-fsmonitor hook is not executed by a status call. Git still reads the other
-repository configuration, so do not treat `git_status` on an untrusted
-repository as a hardened boundary.
+fsmonitor hook or `post-index-change` hook is not executed by a status call.
+Git still reads the other repository configuration, so do not treat
+`git_status` on an untrusted repository as a hardened boundary.
 
 ## Secret handling
 
 The secret is compared with `hmac.compare_digest` on bytes for both the URL
 prefix and the Bearer header, so a non-ASCII `Authorization` header gets 404
-instead of a server error. `.mcp_secret` is created exclusively (`O_EXCL`)
+instead of a server error. The `Bearer` scheme is matched
+case-insensitively, as RFC 9110 requires. The URL-path form is kept for
+clients that cannot set headers; it puts the secret in the request URL, so
+it reaches the tunnel provider and any proxy logs. Prefer the Bearer form
+when the client supports it and rotate the secret periodically.
+`.mcp_secret` is created exclusively (`O_EXCL`)
 and flushed to disk before it is read back; an empty file stops the server
 with an instruction instead of silently generating a new secret. The uvicorn
 access log is filtered so the secret-bearing URL path is replaced with
-`<redacted>`. `.mcp_secret` and `.tunnel_token` are hidden from MCP reads and
-listings.
+`<redacted>`, while the record arguments keep their shape for the uvicorn
+access formatter. `.mcp_secret` and `.tunnel_token` are hidden from MCP reads
+and listings.

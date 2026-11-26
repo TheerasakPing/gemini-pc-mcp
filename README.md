@@ -86,7 +86,9 @@ cloudflared tunnel --url http://127.0.0.1:8000
 
 ## 📂 โฟลเดอร์ทำงาน (Workspace)
 
-ค่าเริ่มต้นคือโฟลเดอร์ของโปรเจกต์นี้ ถ้าต้องการเปลี่ยน ให้กำหนดผ่าน Environment Variable `MCP_WORKSPACE`:
+ค่าเริ่มต้นคือโฟลเดอร์ย่อย `workspace` ในโฟลเดอร์ของแอป server จะไม่เริ่มทำงานถ้า workspace ชี้ไปที่รูทของดิสก์หรือโฟลเดอร์ home ของผู้ใช้ ถ้าต้องการเปลี่ยน ให้กำหนดผ่าน Environment Variable `MCP_WORKSPACE`:
+
+> ถ้าอัปเกรดจากเวอร์ชันที่ workspace คือโฟลเดอร์ของโปรเจกต์ ไฟล์เดิมจะมองไม่เห็น ให้ย้ายไฟล์เข้า `workspace` หรือตั้ง `MCP_WORKSPACE` ชี้ไปที่โฟลเดอร์เดิม
 
 ```powershell
 $env:MCP_WORKSPACE = "C:\Your\Custom\Path"
@@ -98,8 +100,9 @@ python server.py
 ## ⚠️ ความปลอดภัย
 
 - ถ้าไม่มีรหัสลับ server จะตอบ 404 ทุก request ถ้ารหัสหลุดเมื่อไหร่ ให้สร้าง `.mcp_secret` ใหม่แล้วรีสตาร์ท server
-- MCP **อ่านหรือแสดงไม่ได้**: `.mcp_secret`, `.tunnel_token`, `.git`, `.env` และทุกอย่างที่อยู่นอกโฟลเดอร์ทำงาน
-- MCP **เขียนไม่ได้** ไฟล์ที่ Python/Windows โหลดหรือรันได้ทั้งชุด (`.py .pyw .pyc .pyo .pyd .pyz .pth .so .bat .cmd .com .exe .dll .scr .ps1 .vbs .js .wsf .hta .lnk .url .reg .msi` และอื่นๆ) กันเขียนทับ `server.py`/`start.bat` และกัน shadow โมดูล Python ในโฟลเดอร์แอป
+- MCP **อ่านหรือแสดงไม่ได้**: ไฟล์และโฟลเดอร์ลับตามรูปแบบชื่อ เช่น `.mcp_secret*`, `.tunnel_token*`, `.git`, `.env*`, `*.env`, `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.gitconfig`, `id_rsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx` และทุกอย่างที่อยู่นอกโฟลเดอร์ทำงาน
+- MCP **เขียนไม่ได้** ไฟล์ที่ Python/Windows/ระบบอื่นโหลดหรือรันได้ทั้งชุด (`.py .pyw .pyc .pyo .pyd .pyz .pth .so .bat .cmd .com .exe .dll .scr .ps1 .vbs .js .wsf .hta .lnk .url .reg .msi .sh .bash .zsh .fish .cjs .mjs .rb .pl .php .lua .jar .desktop .service` และอื่นๆ)
+- MCP **เขียนทับไม่ได้** ไฟล์ที่เครื่องมือติดตั้งหรือ build/CI อ่าน เช่น `requirements.txt`, `pyproject.toml`, `package.json`, `Cargo.toml`, `Makefile`, `Dockerfile`, `.gitmodules`, `.envrc`, ไฟล์ rc ของ shell และทุกอย่างใน `.github` กับ `.gitlab` กติกานี้ไม่มีตัวแปรปิด
 - ชื่อไฟล์ลับเทียบแบบไม่สนตัวพิมพ์ (`.GIT` ถือเป็น `.git`) และตรวจพาธที่ resolve แล้วอีกรอบ กัน alias ชื่อสั้น 8.3 บน Windows
 - ขีดจำกัดทั้งหมดตั้งผ่านตัวแปร: `MCP_MAX_FILE_BYTES` (25 MiB) สำหรับอ่าน/เขียน/Base64/ดาวน์โหลด, `MCP_MAX_LIST_ENTRIES` (5000) และ `MCP_MAX_LIST_DEPTH` (32) สำหรับ `list_files`, `MCP_COMMAND_TIMEOUT` (15 วินาที) และ output สูงสุด 256 KiB สำหรับ `run_allowed_command`
 - `git_status` ปิด fsmonitor hook ของ repo และ access log ของ uvicorn ปิดบังรหัสลับใน URL
