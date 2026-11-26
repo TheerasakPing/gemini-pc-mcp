@@ -3,7 +3,11 @@ import base64
 from pathlib import Path
 import subprocess
 
-# Network controls: URL downloads are deny-by-default and size-limited.\nfrom security import download_url\n\n# รองรับทั้ง mcp เวอร์ชัน 1.x และ 2.x\ntry:
+# Network controls: URL downloads are deny-by-default and size-limited.
+from security import download_url
+
+# รองรับทั้ง mcp เวอร์ชัน 1.x และ 2.x
+try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
     try:
