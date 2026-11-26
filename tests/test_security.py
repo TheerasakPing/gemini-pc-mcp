@@ -1,9 +1,11 @@
+import ipaddress
 import os
 import unittest
 from unittest.mock import patch
 
 from security import (
     DownloadSecurityError,
+    _TRANSLATED_NETWORKS,
     _resolve_public_addresses,
     download_url,
     validate_download_url,
@@ -34,6 +36,12 @@ class DownloadValidationTests(unittest.TestCase):
     @patch("security.socket.getaddrinfo")
     def test_rejects_private_dns_resolution(self, getaddrinfo):
         getaddrinfo.return_value = [(2, 1, 6, "", ("127.0.0.1", 443))]
+        with self.assertRaises(DownloadSecurityError):
+            _resolve_public_addresses("files.example.com")
+
+        translated = ipaddress.ip_address("::ffff:0:7f00:1")
+        self.assertTrue(any(translated in network for network in _TRANSLATED_NETWORKS))
+        getaddrinfo.return_value = [(10, 1, 6, "", ("::ffff:0:7f00:1", 443, 0, 0))]
         with self.assertRaises(DownloadSecurityError):
             _resolve_public_addresses("files.example.com")
 

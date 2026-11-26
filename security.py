@@ -17,7 +17,7 @@ DEFAULT_MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 DEFAULT_DOWNLOAD_TIMEOUT = 20
 # IPv6 translation prefixes that can carry a private IPv4 address: NAT64 and 6to4.
 _TRANSLATED_NETWORKS = tuple(
-    ipaddress.ip_network(network) for network in ("64:ff9b::/96", "2002::/16")
+    ipaddress.ip_network(network) for network in ("64:ff9b::/96", "2002::/16", "::ffff:0:0:0/96")
 )
 
 
