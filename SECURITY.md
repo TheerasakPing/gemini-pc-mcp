@@ -19,12 +19,11 @@ non-standard ports, and redirects. The response is capped at 25 MiB by default.
 Operators can adjust the cap with `MCP_MAX_DOWNLOAD_BYTES` and the network
 timeout with `MCP_DOWNLOAD_TIMEOUT` (seconds).
 
-**Important limitation:** hostname resolution is checked before urllib opens
-the connection; the current implementation does not pin the validated IP to
-the socket. A hostile DNS operator could theoretically change the answer
-between validation and connection. Treat the hostname allowlist as trusted
-configuration, and do not allow domains controlled by untrusted users. A
-follow-up hardening task must pin the resolved address at the transport layer.
+DNS answers are validated and the selected public IP is pinned to the
+HTTPS socket. TLS certificate validation and SNI continue to use the original
+hostname. This closes the validation-to-connect DNS rebinding gap for this
+download path. The exact hostname allowlist must still contain only domains
+trusted by the local operator.
 
 ## MCP transport DNS rebinding
 
