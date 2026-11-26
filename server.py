@@ -78,7 +78,16 @@ DEFAULT_WORKSPACE = Path(__file__).resolve().parent / "workspace"
 
 def resolve_workspace(raw: str | Path | None) -> Path:
     """root ของดิสก์หรือโฮมไดเรกทอรีไม่ใช่ Workspace เพราะเท่ากับเปิดทั้งเครื่องให้ AI"""
-    workspace = Path(str(raw or "").strip() or DEFAULT_WORKSPACE).resolve()
+    text = str(raw or "").strip()
+    # ตัด prefix \\?\ ที่ใช้เลี่ยงการเทียบพาธ และผูก path สัมพัทธ์กับโฟลเดอร์แอป ไม่ใช่ cwd ตอนสั่งรัน
+    if text[:4] == "\\\\?\\":
+        text = text[4:]
+        if text[:4].upper() == "UNC\\":
+            text = "\\\\" + text[4:]
+    workspace = Path(text or str(DEFAULT_WORKSPACE))
+    if not workspace.is_absolute():
+        workspace = DEFAULT_WORKSPACE.parent / workspace
+    workspace = workspace.resolve()
     if workspace == Path(workspace.anchor) or workspace == Path.home().resolve():
         raise ValueError(
             "MCP_WORKSPACE ต้องเป็นโฟลเดอร์เฉพาะสำหรับงาน ไม่ใช่ root ของดิสก์หรือโฮมไดเรกทอรี"
@@ -100,6 +109,9 @@ HIDDEN_NAMES = {
     ".ssh", ".aws", ".gnupg", ".kube", ".docker",
     ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".gitconfig",
     "id_rsa*", "id_ed25519*", "id_ecdsa*", "*.pem", "*.key", "*.p12", "*.pfx",
+    "id_dsa*", "id_dss*", "_netrc", ".azure", ".vault-token", ".pgpass", ".htpasswd",
+    "*.env.*", "*.jks", "*.keystore", "*.ppk", "*.kdbx",
+    ".mcp-tmp-*",
 }
 # ห้ามเขียนทับไฟล์ที่ Python/Windows/shell โหลดหรือรันได้ (.pyc/.pyd shadow โมดูลได้, .sh/.cjs รันโดย interpreter)
 BLOCKED_WRITE_EXT = {
@@ -122,6 +134,15 @@ BLOCKED_WRITE_NAMES = {
     "appveyor.yml", "azure-pipelines.yml", ".drone.yml", ".pre-commit-config.yaml",
     "makefile", "gnumakefile", "dockerfile*", "docker-compose*.yml", "docker-compose*.yaml",
     ".envrc",
+    ".vscode", ".claude", ".cargo", "*.code-workspace",
+    "pom.xml", "build.gradle", "build.gradle.kts", "build.sbt", "cmakelists.txt", "configure",
+    "configure.ac", "meson.build", "rakefile", "sconstruct", "build.bazel", "justfile",
+    "taskfile.yml", "flake.nix", "shell.nix", "default.nix", ".bazelrc",
+    "bitbucket-pipelines.yml", ".woodpecker.yml", "cloudbuild.yaml", ".gitea", ".forgejo",
+    "bun.lock", "bun.lockb", "npm-shrinkwrap.json", "composer.json", "composer.lock",
+    "pnpm-workspace.yaml", "bunfig.toml", "uv.toml", "podfile", "*.gemspec",
+    "compose.yaml", "compose.yml", "containerfile",
+    ".rprofile", ".renviron", ".gdbinit", "vite.config.*", "next.config.*",
     ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv",
     ".zlogin", ".zlogout", ".zprofile", ".kshrc", ".cshrc", ".tcshrc", ".login", ".logout",
 }

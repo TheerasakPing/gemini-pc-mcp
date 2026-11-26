@@ -147,6 +147,22 @@ class TransportTests(unittest.TestCase):
         self.assertIn("<redacted>/mcp", line)
         self.assertIn("200", line)
 
+    def test_access_formatter_renders_redacted_line(self):
+        record = logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 1,
+            '%s - "%s %s HTTP/%s" %d',
+            ("127.0.0.1:1", "POST", f"/{server.MCP_SECRET}/mcp", "1.1", 200),
+            None,
+        )
+        for item in logging.getLogger("uvicorn.access").filters:
+            item.filter(record)
+        formatter = uvicorn.logging.AccessFormatter(
+            '%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False
+        )
+        text = formatter.format(record)
+        self.assertNotIn(server.MCP_SECRET, text)
+        self.assertIn("<redacted>/mcp", text)
+
 
 class AccessLogRedactionTests(unittest.TestCase):
     def test_secret_is_removed_from_log_line(self):
@@ -173,8 +189,9 @@ class ToolPolicyTests(unittest.TestCase):
     def test_hidden_patterns_block_read_write_and_list(self):
         folder = Path(tempfile.mkdtemp(dir=self.workspace))
         try:
-            names = [".env", ".ENV.local", "prod.env", ".mcp_secret.bak", ".TUNNEL_TOKEN.bak",
-                     ".gitconfig", "server.key"]
+            names = [".env", ".ENV.local", "prod.env", "prod.env.bak", ".mcp_secret.bak",
+                     ".TUNNEL_TOKEN.bak", ".gitconfig", "server.key", "id_dsa", "id_dss",
+                     "cert.jks", ".vault-token", ".mcp-tmp-abc"]
             for name in names:
                 (folder / name).write_text("private")
                 relative = f"{folder.name}/{name}"
@@ -186,6 +203,10 @@ class ToolPolicyTests(unittest.TestCase):
             (folder / ".ssh" / "id_ed25519").write_text("private")
             with self.assertRaises(ValueError):
                 server.read_file(f"{folder.name}/.ssh/id_ed25519")
+            (folder / ".azure").mkdir()
+            (folder / ".azure" / "profile.json").write_text("private")
+            with self.assertRaises(ValueError):
+                server.read_file(f"{folder.name}/.azure/profile.json")
             self.assertFalse(
                 any(name.startswith(folder.name) for name in server.list_files())
             )
@@ -195,7 +216,9 @@ class ToolPolicyTests(unittest.TestCase):
     def test_dependency_ci_build_and_shell_config_files_are_blocked(self):
         blocked = ("requirements.txt", "requirements-dev.txt", "pyproject.toml", "package.json",
                    ".github/workflows/x.yml", ".gitlab-ci.yml", "Jenkinsfile", "Makefile",
-                   "Dockerfile.prod", ".gitmodules", ".bashrc", ".zshenv", ".envrc")
+                   "Dockerfile.prod", ".gitmodules", ".bashrc", ".zshenv", ".envrc",
+                   ".vscode/tasks.json", ".cargo/config.toml", ".claude/settings.json",
+                   "x.code-workspace", "pom.xml", "compose.yaml", "flake.nix", "vite.config.ts")
         for name in blocked:
             with self.assertRaises(ValueError, msg=name):
                 server.write_file(name, "x")
@@ -257,6 +280,17 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             server.resolve_workspace(Path.home())
 
+    @unittest.skipUnless(os.name == "nt", "Windows verbatim path prefix")
+    def test_verbatim_home_prefix_is_refused(self):
+        with self.assertRaises(ValueError):
+            server.resolve_workspace("\\\\?\\" + str(Path.home()))
+
+    def test_relative_path_is_based_on_the_app_folder(self):
+        self.assertEqual(
+            server.resolve_workspace("ws-relative"),
+            (server.DEFAULT_WORKSPACE.parent / "ws-relative").resolve(),
+        )
+
 
 class CommandTests(unittest.TestCase):
     def test_allowed_commands_use_absolute_executables(self):
@@ -290,14 +324,23 @@ class CommandTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("whoami"), "Windows whoami.exe")
     def test_workspace_executable_is_not_picked_up(self):
-        fake = Path(server.WORKSPACE_DIR) / "git.exe"
+        workspace = Path(server.WORKSPACE_DIR)
+        marker = workspace / f"marker-{os.getpid()}.txt"
+        marker.write_text("x")
+        fake = workspace / "cmd.exe"
         shutil.copy(shutil.which("whoami"), fake)
+        previous = os.getcwd()
+        search_flag = os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
         try:
-            direct = subprocess.run([str(fake)], capture_output=True, text=True).stdout.strip()
-            self.assertTrue(direct)
-            self.assertNotEqual(server.run_allowed_command("git_status").strip(), direct)
+            os.chdir(workspace)
+            result = server.run_allowed_command("list_dir")
         finally:
+            os.chdir(previous)
+            if search_flag is not None:
+                os.environ["NoDefaultCurrentDirectoryInExePath"] = search_flag
             fake.unlink()
+            marker.unlink()
+        self.assertIn(marker.name, result)
 
     def test_output_is_capped(self):
         result = server._run_bounded(
@@ -344,15 +387,32 @@ class CommandTests(unittest.TestCase):
         post.write_text("#!/bin/sh\necho ran > post-index-ran.txt\n")
         post.chmod(0o755)
         (workspace / ".git" / "config").write_text("[core]\n\tfsmonitor = .git/hooks/fsmon\n")
-        (workspace / "tracked.txt").write_text("x")
+        tracked = workspace / "tracked.txt"
+        tracked.write_text("x")
+        git = [
+            "git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+            "-c", "commit.gpgsign=false",
+        ]
+        subprocess.run([*git, "add", "tracked.txt"], cwd=workspace, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "init"], cwd=workspace, check=True)
+        # Same content, new mtime: the index stat data is stale, so a plain
+        # status refreshes and rewrites the index, which fires post-index-change.
+        tracked.write_text("x")
 
+        def clear_markers():
+            for name in ("hook-ran.txt", "post-index-ran.txt"):
+                (workspace / name).unlink(missing_ok=True)
+
+        clear_markers()
         result = server.run_allowed_command("git_status")
         self.assertFalse((workspace / "hook-ran.txt").exists(), result)
         self.assertFalse((workspace / "post-index-ran.txt").exists(), result)
 
-        # Control: a plain status call must trigger the hook, proving the fixture works.
+        # Control: a plain status call must trigger both hooks, proving the fixture works.
+        clear_markers()
         subprocess.run(["git", "status"], cwd=workspace, capture_output=True, check=True)
         self.assertTrue((workspace / "hook-ran.txt").exists())
+        self.assertTrue((workspace / "post-index-ran.txt").exists())
 
 
 if __name__ == "__main__":
