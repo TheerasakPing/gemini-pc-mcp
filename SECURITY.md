@@ -47,7 +47,6 @@ in `MCP_ALLOWED_ORIGINS`. Do not use wildcard hostnames. Quick Tunnel creates
 a changing hostname, so it requires a deliberate allowlist update for each
 new hostname; the server intentionally does not accept arbitrary tunnel hosts.
 
-
 The MCP SDK DNS-rebinding protection is enabled in both the compatibility path
 and the primary Streamable HTTP app. Some reverse-proxy/tunnel hostnames may
 need explicit allow-list configuration supported by the installed MCP SDK.
@@ -58,3 +57,21 @@ Do not disable this protection to work around host validation failures.
 Do not publish secrets, tunnel tokens, authorization headers, or full
 secret-bearing MCP endpoint URLs in issues or logs. Rotate `.mcp_secret`
 immediately if it may have been exposed.
+
+## Workspace filesystem protections
+
+Workspace paths reject absolute paths, parent traversal, hidden system
+components, symbolic links, and Windows reparse points. File writes use a
+same-directory temporary file followed by an atomic replace. Append is
+implemented as a locked read-and-replace operation. Reads, writes, Base64
+payloads, and URL downloads are capped by `MCP_MAX_FILE_BYTES` (25 MiB by
+default).
+
+The append lock is process-local: it prevents concurrent writes handled by
+threads in this server process, but is not a cross-process lock. The path
+validation and final filesystem operation are also separate operations, so a
+local actor with write access to the workspace parent could race directory
+replacement (TOCTOU). Run the server under a dedicated OS account and ensure
+untrusted users cannot modify the workspace root or its parent. A follow-up
+platform-specific openat/handle-relative implementation is required for
+strong cross-process and hostile-local-user race resistance.
