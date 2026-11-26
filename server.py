@@ -6,6 +6,33 @@ import subprocess
 # Network controls: URL downloads are deny-by-default and size-limited.
 from security import download_url
 
+def build_transport_security_settings():
+    """Build a fail-closed Host/Origin allowlist for the MCP HTTP transport."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    allowed_hosts = [
+        item.strip()
+        for item in os.getenv(
+            "MCP_ALLOWED_HOSTS",
+            "127.0.0.1:8000,localhost:8000,[::1]:8000",
+        ).split(",")
+        if item.strip()
+    ]
+    allowed_origins = [
+        item.strip()
+        for item in os.getenv(
+            "MCP_ALLOWED_ORIGINS",
+            "http://127.0.0.1:8000,http://localhost:8000,http://[::1]:8000",
+        ).split(",")
+        if item.strip()
+    ]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 # รองรับทั้ง mcp เวอร์ชัน 1.x และ 2.x
 try:
     from mcp.server.fastmcp import FastMCP
@@ -24,14 +51,7 @@ except ImportError:
                 if transport == "streamable-http":
                     kwargs.setdefault("host", self._default_host)
                     kwargs.setdefault("port", self._default_port)
-                    try:
-                        from mcp.server.transport_security import TransportSecuritySettings
-                        kwargs.setdefault(
-                            "transport_security",
-                            TransportSecuritySettings(enable_dns_rebinding_protection=True),
-                        )
-                    except Exception:
-                        pass
+                    kwargs.setdefault("transport_security", build_transport_security_settings())
                 return super().run(transport=transport, **kwargs)
 
 # สร้างอินสแตนซ์ FastMCP
@@ -177,11 +197,7 @@ MCP_SECRET = _load_secret()
 def make_app():
     from starlette.responses import PlainTextResponse
     kwargs = {"streamable_http_path": "/mcp", "stateless_http": True}
-    try:
-        from mcp.server.transport_security import TransportSecuritySettings
-        kwargs["transport_security"] = TransportSecuritySettings(enable_dns_rebinding_protection=True)
-    except Exception:
-        pass
+    kwargs["transport_security"] = build_transport_security_settings()
     inner = mcp.streamable_http_app(**kwargs)
     prefix = f"/{MCP_SECRET}"
     not_found = PlainTextResponse("Not Found", status_code=404)
