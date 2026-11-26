@@ -1,11 +1,9 @@
 import os
 import base64
-import urllib.request
 from pathlib import Path
 import subprocess
 
-# รองรับทั้ง mcp เวอร์ชัน 1.x และ 2.x
-try:
+# Network controls: URL downloads are deny-by-default and size-limited.\nfrom security import download_url\n\n# รองรับทั้ง mcp เวอร์ชัน 1.x และ 2.x\ntry:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
     try:
@@ -26,7 +24,7 @@ except ImportError:
                         from mcp.server.transport_security import TransportSecuritySettings
                         kwargs.setdefault(
                             "transport_security",
-                            TransportSecuritySettings(enable_dns_rebinding_protection=False),
+                            TransportSecuritySettings(enable_dns_rebinding_protection=True),
                         )
                     except Exception:
                         pass
@@ -128,9 +126,7 @@ def download_file_from_url(filename: str, url: str) -> str:
     """ดาวน์โหลดไฟล์หรือรูปภาพจาก URL มาเก็บไว้ในโฟลเดอร์ทำงานบน PC"""
     path = writable_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = resp.read()
+    data = download_url(url)
     path.write_bytes(data)
     return f"ดาวน์โหลดไฟล์ {filename} จาก URL เรียบร้อยแล้ว (ขนาด {len(data)} bytes)"
 
