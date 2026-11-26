@@ -71,18 +71,27 @@ The default workspace is the `workspace/` subdirectory next to `server.py`,
 not the application directory. The application directory is `sys.path[0]` and
 holds the dependency and CI configuration of the server itself, so MCP never
 writes there by default. Set `MCP_WORKSPACE` to point the tools at another
-folder. The server refuses to start when that folder is a filesystem root or
-the user's home directory; use a dedicated folder for AI output.
+folder. A relative `MCP_WORKSPACE` resolves against the application folder,
+not against the directory the server was started from. The server refuses to
+start when that folder is a filesystem root or the user's home directory; use
+a dedicated folder for AI output. The guard compares the resolved path as a
+string after removing the Windows `\\?\` prefix. It does not map UNC admin
+shares such as `\\localhost\c$\Users\me` onto a local path, and it is advice
+against a typo, not a boundary: the operator controls `MCP_WORKSPACE`.
 
 Workspace paths reject absolute paths, parent traversal, hidden system
 components, symbolic links, and Windows reparse points. Hidden names are
 compared case-insensitively and support globs:
 
 - Server secrets: `.mcp_secret`, `.mcp_secret.*`, `.tunnel_token`, `.tunnel_token.*`, `.git`.
-- Environment files: `.env*` (`.env.local`, `.env.production`, `.envrc`) and `*.env` (`prod.env`).
-- Credential stores: `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`,
-  `.git-credentials`, `.npmrc`, `.pypirc`, `.gitconfig`.
-- Key material: `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`.
+- Environment files: `.env*` (`.env.local`, `.env.production`, `.envrc`) and
+  `*.env`, `*.env.*` (`prod.env`, `prod.env.bak`).
+- Credential stores: `.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`, `.docker`,
+  `.netrc`, `_netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.gitconfig`,
+  `.vault-token`, `.pgpass`, `.htpasswd`.
+- Key material: `id_rsa*`, `id_dsa*`, `id_dss*`, `id_ed25519*`, `id_ecdsa*`,
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.ppk`, `*.kdbx`.
+- Write staging: `.mcp-tmp-*`, so an in-flight or crashed write is not readable.
 
 Hidden names cannot be read, written, or listed. Other secrets inside the
 workspace (for example `credentials.json` or `terraform.tfstate`) are still
@@ -117,18 +126,30 @@ Writes are refused in two cases.
 2. By name, for files that tooling runs or loads without the user opening
    them: dependency manifests (`requirements*.txt`, `pyproject.toml`,
    `setup.cfg`, `Pipfile*`, `poetry.lock`, `uv.lock`, `package.json`,
-   `*-lock.json`, `*-lock.yaml`, `yarn.lock`, `.yarnrc.yml`, `.npmrc`,
-   `Cargo.toml`, `Cargo.lock`, `build.rs`, `go.mod`, `go.sum`, `Gemfile*`),
-   CI configuration (`.github`, `.gitlab`, `.gitlab-ci.yml`, `.circleci`,
-   `.buildkite`, `Jenkinsfile`, `.travis.yml`, `appveyor.yml`,
-   `azure-pipelines.yml`, `.drone.yml`, `.pre-commit-config.yaml`), build
-   files (`Makefile`, `Dockerfile*`, `docker-compose*.yml`), `.gitmodules`,
-   `.envrc`, and shell startup files (`.bashrc`, `.bash_profile`, `.profile`,
-   `.zshrc`, `.zshenv`, ...).
+   `*-lock.json`, `*-lock.yaml`, `yarn.lock`, `bun.lock`, `.yarnrc.yml`,
+   `.npmrc`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `go.mod`, `go.sum`,
+   `Gemfile*`, `composer.json`, `composer.lock`, `Podfile`), CI
+   configuration (`.github`, `.gitlab`, `.gitlab-ci.yml`, `.circleci`,
+   `.buildkite`, `.gitea`, `.forgejo`, `Jenkinsfile`, `.travis.yml`,
+   `appveyor.yml`, `azure-pipelines.yml`, `.drone.yml`, `.woodpecker.yml`,
+   `.pre-commit-config.yaml`), build files (`Makefile`, `Dockerfile*`,
+   `docker-compose*.yml`, `compose.yaml`, `Containerfile`, `pom.xml`,
+   `build.gradle*`, `CMakeLists.txt`, `configure`, `configure.ac`,
+   `meson.build`, `Rakefile`, `flake.nix`, `shell.nix`, `default.nix`),
+   editor and tool configuration that runs commands (`.vscode`, `.claude`,
+   `.cargo`, `*.code-workspace`, `vite.config.*`, `next.config.*`),
+   `.gitmodules`, `.envrc`, and shell or interpreter startup files (`.bashrc`,
+   `.bash_profile`, `.profile`, `.zshrc`, `.zshenv`, `.Rprofile`, `.Renviron`,
+   `.gdbinit`).
 
 The name list is not exhaustive. It covers the files that common tooling
 executes automatically; review what the AI wrote before you commit, build,
 or install.
+
+The Bazel root files `BUILD` and `WORKSPACE` are deliberately not blocked by
+name. The check applies to every path component, so blocking those two names
+would also block any directory called `build` or `workspace`. Review Bazel
+files by hand.
 
 Limits are positive integers read from the environment at startup:
 
@@ -155,6 +176,13 @@ Residual risks:
   cross-process and hostile-local-user race resistance.
 - There is no workspace quota. Each write is capped by `MCP_MAX_FILE_BYTES`,
   but repeated writes can fill the disk that holds the workspace.
+- `_PATH_LOCKS` keeps one lock per distinct path for the life of the process.
+  A long session that writes many different files grows it without bound.
+- `list_files` hides hidden names, but `list_dir` and `git_status` print raw
+  command output and can reveal hidden file and folder names, never contents.
+- The access log redactor rewrites the request line only. A traceback logged
+  with `exc_info`, or a record whose `args` is a dict or bytes, is not
+  redacted. No current uvicorn path logs the secret that way.
 - On FAT volumes `st_ino` is 0, which disables the identity check on the
   open descriptor; the type and size checks still apply.
 - On Windows the `0o600` mode of a new `.mcp_secret` has no effect; the file
